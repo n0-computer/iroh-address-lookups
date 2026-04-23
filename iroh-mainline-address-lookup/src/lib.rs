@@ -8,22 +8,21 @@
 use std::sync::{Arc, Mutex};
 
 use iroh::{
-    Endpoint,
     address_lookup::{
-        AddrFilter, AddressLookup, AddressLookupBuilder, AddressLookupBuilderError, EndpointData,
+        AddrFilter, AddressLookup, AddressLookupBuilderError, EndpointData,
         Error as AddressLookupError, Item as AddressLookupItem,
     },
     endpoint_info::EndpointInfo,
 };
 use iroh_base::{EndpointId, SecretKey};
 use iroh_dns::pkarr::{SignedPacket, SignedPacketVerifyError, Timestamp};
-use mainline::{Dht, DhtBuilder, MutableItem};
 use n0_future::{
     boxed::BoxStream,
     stream::StreamExt,
     task::{self, AbortOnDropHandle},
     time::{self, Duration},
 };
+use n0_mainline::{Dht, DhtBuilder, MutableItem};
 // DEFAULT_PKARR_TTL is private to iroh's pkarr module; redefine it here.
 const DEFAULT_PKARR_TTL: u32 = 30;
 
@@ -105,10 +104,10 @@ impl Inner {
 
         let maybe_item = self
             .dht
-            .clone()
-            .as_async()
             .get_mutable_most_recent(public_key.as_bytes(), None)
-            .await;
+            .await
+            .ok()
+            .flatten();
         match maybe_item {
             Some(item) => {
                 let signed_packet = match mutable_item_to_signed_packet(&item) {
@@ -212,10 +211,14 @@ impl Builder {
     }
 
     /// Builds the address lookup mechanism.
-    pub fn build(self) -> Result<DhtAddressLookup, AddressLookupBuilderError> {
+    ///
+    /// Constructing the DHT is async (it binds a UDP socket and bootstraps the
+    /// routing table), so this must be awaited.
+    pub async fn build(self) -> Result<DhtAddressLookup, AddressLookupBuilderError> {
         let dht_builder = self.dht_builder.unwrap_or_default();
         let dht = dht_builder
             .build()
+            .await
             .map_err(|e| AddressLookupBuilderError::from_err("pkarr-dht", e))?;
         let ttl = self.ttl.unwrap_or(DEFAULT_PKARR_TTL);
         let secret_key = self.secret_key.filter(|_| self.enable_publish);
@@ -228,15 +231,6 @@ impl Builder {
             task: Default::default(),
             filter: self.addr_filter,
         })))
-    }
-}
-
-impl AddressLookupBuilder for Builder {
-    fn into_address_lookup(
-        self,
-        endpoint: &Endpoint,
-    ) -> Result<impl AddressLookup, AddressLookupBuilderError> {
-        self.secret_key(endpoint.secret_key().clone()).build()
     }
 }
 
@@ -261,20 +255,14 @@ impl DhtAddressLookup {
         let initial_cas = this
             .0
             .dht
-            .clone()
-            .as_async()
             .get_mutable_most_recent(public_key.as_bytes(), None)
             .await
+            .ok()
+            .flatten()
             .map(|item| item.seq());
         let mut cas = initial_cas;
         loop {
-            let res = this
-                .0
-                .dht
-                .clone()
-                .as_async()
-                .put_mutable(item.clone(), cas)
-                .await;
+            let res = this.0.dht.put_mutable(item.clone(), cas).await;
             match res {
                 Ok(_) => {
                     tracing::debug!("pkarr publish success. published under {z32}");
@@ -344,8 +332,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use iroh_base::{RelayUrl, TransportAddr};
-    use mainline::Testnet;
     use n0_error::{Result, StdResultExt};
+    use n0_mainline::Testnet;
     use n0_tracing_test::traced_test;
     use url::Url;
 
@@ -356,14 +344,15 @@ mod tests {
     #[traced_test]
     async fn dht_address_lookup_smoke() -> Result {
         let secret = SecretKey::generate();
-        let testnet = Testnet::new_async(3).await.anyerr()?;
+        let testnet = Testnet::new(3).await.anyerr()?;
         let mut dht_builder = DhtBuilder::default();
         dht_builder.bootstrap(&testnet.bootstrap);
         let address_lookup = DhtAddressLookup::builder()
             .secret_key(secret.clone())
             .dht_builder(dht_builder)
             .addr_filter(AddrFilter::unfiltered())
-            .build()?;
+            .build()
+            .await?;
 
         let relay_url: RelayUrl = Url::parse("https://example.com").anyerr()?.into();
 
