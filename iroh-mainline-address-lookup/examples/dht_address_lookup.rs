@@ -13,11 +13,8 @@
 //! relay of the endpoint, this example explicitly removes the filter to publish
 //! all addresses.
 use clap::Parser;
-use iroh::{
-    Endpoint, EndpointId,
-    address_lookup::{AddrFilter, DhtAddressLookup},
-    endpoint::presets,
-};
+use iroh::{Endpoint, EndpointId, address_lookup::AddrFilter, endpoint::presets};
+use iroh_mainline_address_lookup::DhtAddressLookup;
 use n0_error::{Result, StdResultExt};
 use tracing::warn;
 
