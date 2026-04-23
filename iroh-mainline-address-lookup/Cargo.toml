@@ -1,0 +1,37 @@
+[package]
+name = "iroh-mainline-address-lookup"
+version = "0.1.0"
+edition = "2024"
+readme = "README.md"
+description = "BitTorrent Mainline DHT-based address lookup for iroh"
+license = "MIT OR Apache-2.0"
+authors = ["n0 team"]
+repository = "https://github.com/n0-computer/iroh-address-lookups"
+keywords = ["iroh", "dht", "mainline", "pkarr", "address-lookup"]
+
+# Sadly this also needs to be updated in .github/workflows/ci.yml
+rust-version = "1.89"
+
+[lints]
+workspace = true
+
+[dependencies]
+derive_more = { version = "2.0", features = ["debug"] }
+iroh = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }
+iroh-base = { git = "https://github.com/n0-computer/iroh.git", branch = "main", default-features = false, features = ["key", "relay"] }
+iroh-dns = { git = "https://github.com/n0-computer/iroh.git", branch = "main" }
+mainline = "6"
+n0-error = "0.1"
+n0-future = "0.3"
+tokio = { version = "1", default-features = false, features = ["sync"] }
+tracing = "0.1"
+url = "2.5"
+
+[dev-dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "iroh_docsrs"]
