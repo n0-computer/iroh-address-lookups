@@ -66,6 +66,13 @@ use std::{
     sync::Arc,
 };
 
+use iroh::{
+    Endpoint,
+    address_lookup::{
+        AddrFilter, AddressLookup, AddressLookupBuilder, AddressLookupBuilderError, EndpointData,
+        EndpointInfo, Error as AddressLookupError, Item as AddressLookupItem,
+    },
+};
 use iroh_base::{EndpointId, PublicKey};
 use n0_future::{
     Stream,
@@ -77,15 +84,6 @@ use n0_watcher::{Watchable, Watcher as _};
 use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{Instrument, debug, error, info_span, trace, warn};
-
-use iroh::address_lookup::AddressLookupBuilder;
-use iroh::{
-    Endpoint,
-    address_lookup::{
-        AddrFilter, AddressLookup, AddressLookupBuilderError, EndpointData, EndpointInfo,
-        Error as AddressLookupError, Item as AddressLookupItem,
-    },
-};
 
 /// The n0 local service name.
 const N0_SERVICE_NAME: &str = "irohv1";

@@ -7,6 +7,14 @@
 //! [pkarr module]: super
 use std::sync::{Arc, Mutex};
 
+use iroh::{
+    Endpoint,
+    address_lookup::{
+        AddrFilter, AddressLookup, AddressLookupBuilder, AddressLookupBuilderError, EndpointData,
+        Error as AddressLookupError, Item as AddressLookupItem,
+    },
+    endpoint_info::EndpointInfo,
+};
 use iroh_base::{EndpointId, SecretKey};
 use iroh_dns::pkarr::{SignedPacket, SignedPacketVerifyError, Timestamp};
 use mainline::{Dht, DhtBuilder, MutableItem};
@@ -15,15 +23,6 @@ use n0_future::{
     stream::StreamExt,
     task::{self, AbortOnDropHandle},
     time::{self, Duration},
-};
-
-use iroh::{
-    Endpoint,
-    address_lookup::{
-        AddrFilter, AddressLookup, AddressLookupBuilder, AddressLookupBuilderError, EndpointData,
-        Error as AddressLookupError, Item as AddressLookupItem,
-    },
-    endpoint_info::EndpointInfo,
 };
 // DEFAULT_PKARR_TTL is private to iroh's pkarr module; redefine it here.
 const DEFAULT_PKARR_TTL: u32 = 30;
