@@ -614,7 +614,7 @@ mod tests {
         use rand::{CryptoRng, RngExt, SeedableRng};
 
         use super::super::*;
-        use crate::address_lookup::UserData;
+        use iroh::endpoint_info::UserData;
 
         #[tokio::test]
         #[traced_test]
