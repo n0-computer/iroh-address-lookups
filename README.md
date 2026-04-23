@@ -1,14 +1,13 @@
-# net-tools
+# iroh-address-lookups
 
-Network related tools, originally developed to be used and build [iroh](https://github.com/n0-computer/iroh).
+Optional Address Lookup services for [iroh](https://github.com/n0-computer/iroh).
 
-- [`portmapper`](./portmapper/README.md) - Upnp, pcp and nat-pmp support.
-- [`netwatch`](./netwatch/README.md) - Networking interface and route change monitoring.
-
+- [`iroh-mainline-address-lookup`](./iroh-mainline-address-lookup/README.md) — pkarr-based publish/lookup over the BitTorrent Mainline DHT.
+- [`iroh-mdns-address-lookup`](./iroh-mdns-address-lookup/README.md) — mDNS-based discovery for endpoints on the local network.
 
 ## License
 
-Copyright 2024 N0, INC.
+Copyright 2025 N0, INC.
 
 This project is licensed under either of
 
