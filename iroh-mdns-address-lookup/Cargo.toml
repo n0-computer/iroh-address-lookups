@@ -7,7 +7,10 @@ description = "mDNS-based address lookup for iroh"
 license = "MIT OR Apache-2.0"
 authors = ["n0 team"]
 repository = "https://github.com/n0-computer/iroh-address-lookups"
+homepage = "https://github.com/n0-computer/iroh-address-lookups"
+documentation = "https://docs.rs/iroh-mdns-address-lookup"
 keywords = ["iroh", "mdns", "swarm-discovery", "address-lookup"]
+categories = ["network-programming"]
 
 # Sadly this also needs to be updated in .github/workflows/ci.yml
 rust-version = "1.89"
