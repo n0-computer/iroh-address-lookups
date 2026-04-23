@@ -607,6 +607,7 @@ mod tests {
     /// This module's name signals nextest to run test in a single thread (no other concurrent
     /// tests).
     mod run_in_isolation {
+        use iroh::endpoint_info::UserData;
         use iroh_base::{SecretKey, TransportAddr};
         use n0_error::{AnyError as Error, Result, StdResultExt, bail_any};
         use n0_future::StreamExt;
@@ -614,7 +615,6 @@ mod tests {
         use rand::{CryptoRng, RngExt, SeedableRng};
 
         use super::super::*;
-        use iroh::endpoint_info::UserData;
 
         #[tokio::test]
         #[traced_test]
