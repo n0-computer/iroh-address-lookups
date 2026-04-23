@@ -31,8 +31,7 @@ async fn chat_server() -> Result<()> {
     let endpoint_id = secret_key.public();
     let address_lookup = DhtAddressLookup::builder()
         .addr_filter(AddrFilter::unfiltered())
-        .build()
-        .await?;
+        .build()?;
     let endpoint = Endpoint::builder(presets::N0)
         .alpns(vec![CHAT_ALPN.to_vec()])
         .secret_key(secret_key)
@@ -77,7 +76,7 @@ async fn chat_client(args: Args) -> Result<()> {
     let secret_key = iroh::SecretKey::generate();
     let endpoint_id = secret_key.public();
     // note: we don't pass a secret key here, because we don't need to publish our address, don't spam the DHT
-    let address_lookup = DhtAddressLookup::builder().no_publish().build().await?;
+    let address_lookup = DhtAddressLookup::builder().no_publish().build()?;
     // we do not need to specify the alpn here, because we are not going to accept connections
     let endpoint = Endpoint::builder(presets::N0)
         .secret_key(secret_key)

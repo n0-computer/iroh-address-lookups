@@ -8,8 +8,9 @@
 use std::sync::{Arc, Mutex};
 
 use iroh::{
+    Endpoint,
     address_lookup::{
-        AddrFilter, AddressLookup, AddressLookupBuilderError, EndpointData,
+        AddrFilter, AddressLookup, AddressLookupBuilder, AddressLookupBuilderError, EndpointData,
         Error as AddressLookupError, Item as AddressLookupItem,
     },
     endpoint_info::EndpointInfo,
@@ -212,13 +213,12 @@ impl Builder {
 
     /// Builds the address lookup mechanism.
     ///
-    /// Constructing the DHT is async (it binds a UDP socket and bootstraps the
-    /// routing table), so this must be awaited.
-    pub async fn build(self) -> Result<DhtAddressLookup, AddressLookupBuilderError> {
+    /// Must be called from within a Tokio runtime context: the DHT's UDP socket
+    /// is registered with the Tokio reactor during construction.
+    pub fn build(self) -> Result<DhtAddressLookup, AddressLookupBuilderError> {
         let dht_builder = self.dht_builder.unwrap_or_default();
         let dht = dht_builder
             .build()
-            .await
             .map_err(|e| AddressLookupBuilderError::from_err("pkarr-dht", e))?;
         let ttl = self.ttl.unwrap_or(DEFAULT_PKARR_TTL);
         let secret_key = self.secret_key.filter(|_| self.enable_publish);
@@ -231,6 +231,15 @@ impl Builder {
             task: Default::default(),
             filter: self.addr_filter,
         })))
+    }
+}
+
+impl AddressLookupBuilder for Builder {
+    fn into_address_lookup(
+        self,
+        endpoint: &Endpoint,
+    ) -> Result<impl AddressLookup, AddressLookupBuilderError> {
+        self.secret_key(endpoint.secret_key().clone()).build()
     }
 }
 
@@ -351,8 +360,7 @@ mod tests {
             .secret_key(secret.clone())
             .dht_builder(dht_builder)
             .addr_filter(AddrFilter::unfiltered())
-            .build()
-            .await?;
+            .build()?;
 
         let relay_url: RelayUrl = Url::parse("https://example.com").anyerr()?.into();
 
