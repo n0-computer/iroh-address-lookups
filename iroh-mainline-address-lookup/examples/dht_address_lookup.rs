@@ -67,6 +67,7 @@ async fn chat_server() -> Result<()> {
             n0_error::Ok(())
         });
     }
+    endpoint.close().await;
     Ok(())
 }
 
@@ -93,6 +94,7 @@ async fn chat_client(args: Args) -> Result<()> {
         tokio::spawn(async move { tokio::io::copy(&mut tokio::io::stdin(), &mut writer).await });
     _copy_to_stdout.await.anyerr()?.anyerr()?;
     _copy_from_stdin.await.anyerr()?.anyerr()?;
+    endpoint.close().await;
     Ok(())
 }
 
