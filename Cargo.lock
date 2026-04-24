@@ -2052,8 +2052,7 @@ dependencies = [
 [[package]]
 name = "n0-mainline"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eae9fc2d5ba257771376533cc8269dd72359e5e41c36b579d6f56ccb3c909a8"
+source = "git+https://github.com/n0-computer/n0-mainline.git?branch=main#f9feca07e65d3bc9903fd507f20eb4282e4fe263"
 dependencies = [
  "crc",
  "dyn-clone",

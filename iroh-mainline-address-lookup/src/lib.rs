@@ -33,6 +33,13 @@ const DEFAULT_PKARR_TTL: u32 = 30;
 /// published immediately.
 const REPUBLISH_DELAY: Duration = Duration::from_secs(60 * 60);
 
+/// Debounce delay before starting a publish loop.
+///
+/// Rapid endpoint updates can trigger repeated `publish` calls in quick succession.
+/// We delay loop start a little so earlier tasks get replaced and only the latest
+/// endpoint data is published.
+const PUBLISH_DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
+
 /// Convert a [`SignedPacket`] to a mainline [`MutableItem`].
 fn signed_packet_to_mutable_item(packet: &SignedPacket) -> MutableItem {
     MutableItem::new_signed_unchecked(
@@ -251,27 +258,40 @@ impl DhtAddressLookup {
 
     /// Periodically publishes the endpoint address to the DHT.
     ///
-    /// The first publish uses BEP-44 compare-and-swap against the currently-stored seq
-    /// so we don't clobber a concurrent writer for this key. Subsequent iterations are
-    /// refreshes — their purpose is to reach DHT nodes that have newly joined the
-    /// routing table, not to write new data, so they pass `cas: None` (a stale CAS
-    /// would make fresh nodes reject the put).
+    /// Publishes the current endpoint information to the DHT and refreshes it periodically.
+    ///
+    /// We publish without CAS. We assume a single logical writer per endpoint key.
     async fn publish_loop(self, signed_packet: SignedPacket) {
         let this = self;
         let public_key = signed_packet.public_key();
         let z32 = public_key.to_z32();
         let item = signed_packet_to_mutable_item(&signed_packet);
-        let initial_cas = this
-            .0
-            .dht
-            .get_mutable_most_recent(public_key.as_bytes(), None)
-            .await
-            .ok()
-            .flatten()
-            .map(|item| item.seq());
-        let mut cas = initial_cas;
+        let Ok(info) = this.0.dht.info().await else {
+            tracing::error!("failed to read dht info; stopping publish task");
+            return;
+        };
+        if info.routing_table_size() == 0 {
+            let Ok(bootstrapped) = this.0.dht.bootstrapped().await else {
+                tracing::error!("dht bootstrap probe failed; stopping publish task");
+                return;
+            };
+            if !bootstrapped {
+                tracing::warn!("dht bootstrap probe returned not ready");
+            }
+        } else {
+            // Coalesce bursts of updates: publish() replaces the previous task, so a short
+            // initial delay lets only the latest endpoint state proceed.
+            //
+            // We frequently see address changes within milliseconds, and we don't want to
+            // publish every intermediate state to the DHT.
+            //
+            // We only do this if we are bootstrapped, otherwise the bootstrapped call
+            // provides enough debouncing.
+            time::sleep(PUBLISH_DEBOUNCE_DELAY).await;
+        }
+
         loop {
-            let res = this.0.dht.put_mutable(item.clone(), cas).await;
+            let res = this.0.dht.put_mutable(item.clone(), None).await;
             match res {
                 Ok(_) => {
                     tracing::debug!("pkarr publish success. published under {z32}");
@@ -286,7 +306,6 @@ impl DhtAddressLookup {
                     tracing::warn!("pkarr publish error: {}", e);
                 }
             }
-            cas = None;
             time::sleep(this.0.republish_delay).await;
         }
     }
