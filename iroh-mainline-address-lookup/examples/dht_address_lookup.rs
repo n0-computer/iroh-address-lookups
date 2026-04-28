@@ -13,7 +13,7 @@
 //! relay of the endpoint, this example explicitly removes the filter to publish
 //! all addresses.
 use clap::Parser;
-use iroh::{Endpoint, EndpointId, address_lookup::AddrFilter, endpoint::presets};
+use iroh::{Endpoint, EndpointId, RelayMode, address_lookup::AddrFilter, endpoint::presets};
 use iroh_mainline_address_lookup::DhtAddressLookup;
 use n0_error::{Result, StdResultExt};
 use tracing::warn;
@@ -30,8 +30,9 @@ async fn chat_server() -> Result<()> {
     let secret_key = iroh::SecretKey::generate();
     let endpoint_id = secret_key.public();
     let address_lookup = DhtAddressLookup::builder().addr_filter(AddrFilter::unfiltered());
-    let endpoint = Endpoint::builder(presets::N0)
+    let endpoint = Endpoint::builder(presets::Minimal)
         .alpns(vec![CHAT_ALPN.to_vec()])
+        .relay_mode(RelayMode::Default)
         .secret_key(secret_key)
         .address_lookup(address_lookup)
         .bind()
@@ -66,6 +67,7 @@ async fn chat_server() -> Result<()> {
             n0_error::Ok(())
         });
     }
+    endpoint.close().await;
     Ok(())
 }
 
@@ -74,9 +76,10 @@ async fn chat_client(args: Args) -> Result<()> {
     let secret_key = iroh::SecretKey::generate();
     let endpoint_id = secret_key.public();
     // note: we don't pass a secret key here, because we don't need to publish our address, don't spam the DHT
-    let address_lookup = DhtAddressLookup::builder().no_publish();
+    let address_lookup = DhtAddressLookup::builder().no_publish().build()?;
     // we do not need to specify the alpn here, because we are not going to accept connections
-    let endpoint = Endpoint::builder(presets::N0)
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Default)
         .secret_key(secret_key)
         .address_lookup(address_lookup)
         .bind()
@@ -91,6 +94,7 @@ async fn chat_client(args: Args) -> Result<()> {
         tokio::spawn(async move { tokio::io::copy(&mut tokio::io::stdin(), &mut writer).await });
     _copy_to_stdout.await.anyerr()?.anyerr()?;
     _copy_from_stdin.await.anyerr()?.anyerr()?;
+    endpoint.close().await;
     Ok(())
 }
 

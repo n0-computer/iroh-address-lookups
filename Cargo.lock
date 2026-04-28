@@ -783,15 +783,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "document-features"
-version = "0.2.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
-dependencies = [
- "litrs",
-]
-
-[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -886,17 +877,6 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
-
-[[package]]
-name = "flume"
-version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da0e4dd2a88388a1f4ccc7c9ce104604dab68d9f408dc34cd45823d5a9069095"
-dependencies = [
- "futures-core",
- "futures-sink",
- "spin 0.9.8",
-]
 
 [[package]]
 name = "fnv"
@@ -1079,18 +1059,6 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
-dependencies = [
- "cfg-if",
- "libc",
- "r-efi 5.3.0",
- "wasip2",
-]
-
-[[package]]
-name = "getrandom"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
@@ -1098,7 +1066,7 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "r-efi 6.0.0",
+ "r-efi",
  "rand_core",
  "wasip2",
  "wasip3",
@@ -1714,9 +1682,9 @@ dependencies = [
  "iroh",
  "iroh-base",
  "iroh-dns",
- "mainline",
  "n0-error",
  "n0-future",
+ "n0-mainline",
  "n0-tracing-test",
  "tokio",
  "tracing",
@@ -1793,7 +1761,7 @@ dependencies = [
  "iroh-base",
  "iroh-dns",
  "iroh-metrics",
- "lru",
+ "lru 0.16.4",
  "n0-error",
  "n0-future",
  "noq",
@@ -1942,12 +1910,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
-name = "litrs"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1977,6 +1939,12 @@ dependencies = [
 
 [[package]]
 name = "lru"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "227748d55f2f0ab4735d87fd623798cb6b664512fe979705f829c9f81c934465"
+
+[[package]]
+name = "lru"
 version = "0.16.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
@@ -1995,28 +1963,6 @@ name = "mac-addr"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3d25b0e0b648a86960ac23b7ad4abb9717601dec6f66c165f5b037f3f03065f"
-
-[[package]]
-name = "mainline"
-version = "6.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ff27d378ca495eaf3be8616d5d7319c1c18e93fd60e13698fcdc7e19448f1a4"
-dependencies = [
- "crc",
- "document-features",
- "dyn-clone",
- "ed25519-dalek",
- "flume",
- "futures-lite",
- "getrandom 0.3.4",
- "lru",
- "serde",
- "serde_bencode",
- "serde_bytes",
- "sha1_smol",
- "thiserror 2.0.18",
- "tracing",
-]
 
 [[package]]
 name = "matchers"
@@ -2101,6 +2047,28 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
+]
+
+[[package]]
+name = "n0-mainline"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1cb0b57f35b00c645a98df4cbaf9069de8d1f66a7ad14a3e73a1bf4f894da97"
+dependencies = [
+ "crc",
+ "dyn-clone",
+ "ed25519-dalek",
+ "futures-core",
+ "lru 0.13.0",
+ "n0-error",
+ "noq-udp",
+ "rand",
+ "serde",
+ "serde_bencode",
+ "serde_bytes",
+ "sha1_smol",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2731,12 +2699,6 @@ checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "r-efi"
-version = "5.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "r-efi"
