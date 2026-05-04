@@ -9,18 +9,12 @@
 //! to a stream of discovered addresses.
 //!
 //! ```no_run
-//! use std::time::Duration;
-//!
-//! use iroh::{
-//!     RelayMode, SecretKey,
-//!     address_lookup::{DiscoveryEvent, MdnsAddressLookup},
-//!     endpoint::{Endpoint, Source, presets},
-//! };
+//! use iroh::{Endpoint, endpoint::presets};
+//! use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 //! use n0_future::StreamExt;
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let recent = Duration::from_secs(600); // 10 minutes in seconds
 //!     let endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
 //!
 //!     // Register the Address Lookupwith the endpoint
