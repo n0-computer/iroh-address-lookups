@@ -256,4 +256,4 @@ jobs:
       - name: cargo check
         run: |
           rm -f Cargo.lock
-          cargo +nightly check -Z minimal-versions --workspace --all-features --lib --bins
+          cargo +nightly check -Z direct-minimal-versions --workspace --all-features --lib --bins
