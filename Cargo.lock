@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-mainline-address-lookup"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "derive_more",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "iroh-mdns-address-lookup"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "data-encoding",
  "derive_more",
