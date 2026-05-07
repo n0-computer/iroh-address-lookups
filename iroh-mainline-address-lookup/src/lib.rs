@@ -1,10 +1,10 @@
 //! Pkarr based address lookup for iroh, supporting both relay servers and the DHT.
 //!
 //! This module contains pkarr-based address lookup for iroh which can use both pkarr
-//! relay servers as well as the Mainline DHT directly.  See the [pkarr module] for an
-//! overview of pkarr.
+//! relay servers as well as the Mainline DHT directly.  See the [pkarr module] in the
+//! `iroh-dns` crate for an overview of pkarr.
 //!
-//! [pkarr module]: super
+//! [pkarr module]: iroh_dns::pkarr
 use std::sync::{Arc, Mutex};
 
 use iroh::{
@@ -66,7 +66,8 @@ fn mutable_item_to_signed_packet(
 /// Pkarr Mainline DHT and relay server address lookup.
 ///
 /// It stores endpoint addresses in DNS records, signed by the endpoint's private key, and publishes
-/// them to the BitTorrent Mainline DHT.  See the [pkarr module] for more details.
+/// them to the BitTorrent Mainline DHT.  See the [pkarr module] in the `iroh-dns` crate
+/// for more details.
 ///
 /// This implements the [`AddressLookup`] trait to be used as an address lookup service which can
 /// be used as both a publisher and resolver.  Calling [`DhtAddressLookup::publish`] will start
@@ -77,9 +78,9 @@ fn mutable_item_to_signed_packet(
 /// This can be useful to enable publishing IP addresses if the iroh endpoint is reachable via public
 /// IP addresses.
 ///
-/// [pkarr module]: super
-/// [`AddrFilter::relay_only`]: crate::address_lookup::AddrFilter::relay_only
-/// [`AddrFilter::unfiltered`]: crate::address_lookup::AddrFilter::unfiltered
+/// [pkarr module]: iroh_dns::pkarr
+/// [`AddrFilter::relay_only`]: iroh::address_lookup::AddrFilter::relay_only
+/// [`AddrFilter::unfiltered`]: iroh::address_lookup::AddrFilter::unfiltered
 #[derive(Debug, Clone)]
 pub struct DhtAddressLookup(Arc<Inner>);
 

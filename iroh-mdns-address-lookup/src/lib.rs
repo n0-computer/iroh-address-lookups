@@ -51,7 +51,7 @@
 //! constraints above, so for example you can use it to exclude relay URLs entirely or to
 //! prioritize certain addresses.
 //!
-//! [`AddrFilter`]: crate::address_lookup::AddrFilter
+//! [`AddrFilter`]: iroh::address_lookup::AddrFilter
 //! [`RelayUrl`]: iroh_base::RelayUrl
 use std::{
     collections::{BTreeSet, HashMap},
@@ -85,8 +85,6 @@ const N0_SERVICE_NAME: &str = "irohv1";
 /// Name of this address lookup service.
 ///
 /// Used as the `provenance` field in [`AddressLookupItem`]s.
-///
-/// Used in the [`crate::endpoint::Source::AddressLookup`] enum variant as the `name`.
 pub const NAME: &str = "mdns";
 
 /// The key of the attribute under which the `UserData` is stored in
