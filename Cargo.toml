@@ -37,3 +37,9 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(iroh_docsrs)", "cfg(skip_p
 
 [workspace.lints.clippy]
 unused-async = "warn"
+
+
+[patch.crates-io]
+iroh = { git = "https://github.com/n0-computer/iroh", branch = "feat-rc-1" }
+iroh-base = { git = "https://github.com/n0-computer/iroh", branch = "feat-rc-1" }
+iroh-dns = { git = "https://github.com/n0-computer/iroh", branch = "feat-rc-1" }
