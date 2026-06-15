@@ -1561,9 +1561,9 @@ dependencies = [
  "iroh-dns",
  "iroh-metrics",
  "iroh-relay",
- "n0-error 1.0.0",
+ "n0-error",
  "n0-future",
- "n0-watcher 1.0.0",
+ "n0-watcher",
  "netwatch",
  "noq",
  "noq-proto",
@@ -1601,7 +1601,7 @@ dependencies = [
  "derive_more",
  "ed25519-dalek",
  "getrandom 0.4.2",
- "n0-error 1.0.0",
+ "n0-error",
  "rand",
  "serde",
  "url",
@@ -1619,7 +1619,7 @@ dependencies = [
  "derive_more",
  "hickory-resolver",
  "iroh-base",
- "n0-error 1.0.0",
+ "n0-error",
  "n0-future",
  "ndk-context",
  "portable-atomic",
@@ -1641,7 +1641,7 @@ dependencies = [
  "iroh",
  "iroh-base",
  "iroh-dns",
- "n0-error 1.0.0",
+ "n0-error",
  "n0-future",
  "n0-mainline",
  "n0-tracing-test",
@@ -1660,10 +1660,10 @@ dependencies = [
  "futures-util",
  "iroh",
  "iroh-base",
- "n0-error 1.0.0",
+ "n0-error",
  "n0-future",
  "n0-tracing-test",
- "n0-watcher 0.6.1",
+ "n0-watcher",
  "rand",
  "rand_chacha",
  "swarm-discovery",
@@ -1681,7 +1681,7 @@ checksum = "291065721ad7c477b972e581bbc528df031dc8eb5e39fe1ff3300ae5dfb157ef"
 dependencies = [
  "iroh-metrics-derive",
  "itoa",
- "n0-error 1.0.0",
+ "n0-error",
  "portable-atomic",
  "ryu",
  "serde",
@@ -1721,7 +1721,7 @@ dependencies = [
  "iroh-dns",
  "iroh-metrics",
  "lru",
- "n0-error 1.0.0",
+ "n0-error",
  "n0-future",
  "noq",
  "noq-proto",
@@ -1962,33 +1962,12 @@ dependencies = [
 
 [[package]]
 name = "n0-error"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af4782b4baf92d686d161c15460c83d16ebcfd215918763903e9619842665cae"
-dependencies = [
- "n0-error-macros 0.1.3",
- "spez",
-]
-
-[[package]]
-name = "n0-error"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c37e81176a83a77d2514528b91bdafc70ef88aab428f0e1b91aebb8d99888895"
 dependencies = [
- "n0-error-macros 1.0.0",
+ "n0-error-macros",
  "spez",
-]
-
-[[package]]
-name = "n0-error-macros"
-version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03755949235714b2b307e5ae89dd8c1c2531fb127d9b8b7b4adf9c876cd3ed18"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -2034,7 +2013,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-core",
  "lru",
- "n0-error 1.0.0",
+ "n0-error",
  "noq-udp",
  "rand",
  "serde",
@@ -2068,23 +2047,12 @@ dependencies = [
 
 [[package]]
 name = "n0-watcher"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38795f7932e6e9d1c6e989270ef5b3ff24ebb910e2c9d4bed2d28d8bae3007dc"
-dependencies = [
- "derive_more",
- "n0-error 0.1.3",
- "n0-future",
-]
-
-[[package]]
-name = "n0-watcher"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbc618745ad0b7414b149d0517ad8b5573b2fb4d4e2717add3d2446ce1fdd826"
 dependencies = [
  "derive_more",
- "n0-error 1.0.0",
+ "n0-error",
  "n0-future",
 ]
 
@@ -2194,9 +2162,9 @@ dependencies = [
  "ipnet",
  "js-sys",
  "libc",
- "n0-error 1.0.0",
+ "n0-error",
  "n0-future",
- "n0-watcher 1.0.0",
+ "n0-watcher",
  "netdev",
  "netlink-packet-core",
  "netlink-packet-route 0.31.0",
@@ -2606,7 +2574,7 @@ dependencies = [
  "igd-next",
  "iroh-metrics",
  "libc",
- "n0-error 1.0.0",
+ "n0-error",
  "n0-future",
  "netwatch",
  "num_enum",
