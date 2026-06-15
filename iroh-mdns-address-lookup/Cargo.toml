@@ -22,9 +22,9 @@ workspace = true
 data-encoding = "2.10"
 derive_more = { version = "2.1", features = ["debug"] }
 futures-util = "0.3"
-iroh = "=1.0.0-rc.1"
-iroh-base = { version = "=1.0.0-rc.1", default-features = false, features = ["key"] }
-n0-error = "=1.0.0-rc.0"
+iroh = "1.0.0"
+iroh-base = { version = "1.0.0", default-features = false, features = ["key"] }
+n0-error = "1.0.0"
 n0-future = "0.3.2"
 n0-watcher = "0.6"
 swarm-discovery = "0.6"
