@@ -20,7 +20,7 @@ workspace = true
 
 [dependencies]
 derive_more = { version = "2.1", features = ["debug"] }
-iroh = "1.0.0"
+iroh = { version = "1.0.0", default-features = false }
 iroh-base = { version = "1.0.0", default-features = false, features = ["key", "relay"] }
 iroh-dns = "1.0.0"
 n0-mainline = "0.5"
