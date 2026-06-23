@@ -33,6 +33,7 @@ tokio-stream = { version = "0.1.15", features = ["sync"] }
 tracing = "0.1.44"
 
 [dev-dependencies]
+iroh = { version = "1.0.0" }
 n0-tracing-test = "0.3"
 rand = "0.10"
 rand_chacha = "0.10"
