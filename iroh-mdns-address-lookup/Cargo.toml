@@ -22,7 +22,7 @@ workspace = true
 data-encoding = "2.10"
 derive_more = { version = "2.1", features = ["debug"] }
 futures-util = "0.3"
-iroh = "1.0.0"
+iroh = { version = "1.0.0", default-features = false }
 iroh-base = { version = "1.0.0", default-features = false, features = ["key"] }
 n0-error = "1.0.0"
 n0-future = "0.3.2"
@@ -33,6 +33,7 @@ tokio-stream = { version = "0.1.15", features = ["sync"] }
 tracing = "0.1.44"
 
 [dev-dependencies]
+iroh = { version = "1.0.0" }
 n0-tracing-test = "0.3"
 rand = "0.10"
 rand_chacha = "0.10"
