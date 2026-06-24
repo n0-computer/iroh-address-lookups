@@ -53,13 +53,34 @@
 //!
 //! [`AddrFilter`]: iroh::address_lookup::AddrFilter
 //! [`RelayUrl`]: iroh_base::RelayUrl
+//!
+//! ## Multi-homed hosts
+//!
+//! Multicast group membership and egress are per network interface. A single
+//! wildcard socket only joins the multicast group on the interface of the
+//! default route, so on hosts with several network interfaces, mDNS would
+//! neither be received from nor sent to the other interfaces.
+//!
+//! To make discovery work across all local networks a host is attached to,
+//! [`MdnsAddressLookup`] watches the host's network interfaces and maintains
+//! one multicast socket per usable IPv4 interface (up, non-loopback).
+//! Interfaces that appear or disappear at runtime are picked up automatically.
+//! If no usable interface is found (or interface watching fails), it falls
+//! back to the single wildcard socket.
+//!
+//! IPv6 multicast currently still uses only the default interface; this is a
+//! limitation of the underlying `swarm-discovery` crate.
 use std::{
     collections::{BTreeSet, HashMap},
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
+// The crate's own watchables and netwatch's interface state watcher both use
+// the same `n0_watcher` version that iroh re-exports, so a single `Watcher`
+// trait needs to be in scope.
+use iroh::Watcher as _;
 use iroh::{
     Endpoint,
     address_lookup::{
@@ -74,7 +95,7 @@ use n0_future::{
     task::{self, AbortOnDropHandle, JoinSet},
     time::{self, Duration},
 };
-use n0_watcher::{Watchable, Watcher as _};
+use n0_watcher::Watchable;
 use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{Instrument, debug, error, info_span, trace, warn};
@@ -107,6 +128,9 @@ pub struct MdnsAddressLookup {
     advertise: bool,
     /// When `local_addrs` changes, we re-publish our info.
     local_addrs: Watchable<Option<EndpointData>>,
+    /// IPv4 interface addresses currently used for multicast, kept in sync
+    /// with the host's network interfaces by the service task.
+    multicast_interfaces: Arc<RwLock<BTreeSet<Ipv4Addr>>>,
 }
 
 #[derive(Debug)]
@@ -287,6 +311,8 @@ impl MdnsAddressLookup {
 
         let local_addrs: Watchable<Option<EndpointData>> = Watchable::default();
         let mut addrs_change = local_addrs.watch();
+        let multicast_interfaces: Arc<RwLock<BTreeSet<Ipv4Addr>>> = Arc::default();
+        let multicast_interfaces_task = multicast_interfaces.clone();
         let address_lookup_fut = async move {
             let mut endpoint_addrs: HashMap<PublicKey, Peer> = HashMap::default();
             let mut subscribers = Subscribers::new();
@@ -296,11 +322,63 @@ impl MdnsAddressLookup {
                 HashMap<usize, mpsc::Sender<Result<AddressLookupItem, AddressLookupError>>>,
             > = HashMap::default();
             let mut timeouts = JoinSet::new();
+
+            // Maintain one multicast socket per usable IPv4 interface.
+            //
+            // Multicast group membership and egress are per interface, and
+            // without explicit interfaces swarm-discovery operates on a
+            // single wildcard socket that only joins the group on the
+            // interface of the default route. On multi-homed hosts that
+            // makes mDNS invisible on every other interface, and the
+            // membership silently moves when the default route changes.
+            // The `_monitor` binding keeps the OS route/interface watcher
+            // alive for the lifetime of the service task.
+            let _monitor = match netwatch::netmon::Monitor::new().await {
+                Ok(monitor) => Some(monitor),
+                Err(err) => {
+                    warn!(
+                        "failed to start network monitor, mDNS multicast stays on the default interface only: {err:#}"
+                    );
+                    None
+                }
+            };
+            let mut interface_state = _monitor.as_ref().map(|m| m.interface_state());
+            let mut active_interfaces = BTreeSet::new();
+            if let Some(watcher) = interface_state.as_mut() {
+                sync_multicast_interfaces(
+                    &address_lookup,
+                    &mut active_interfaces,
+                    multicast_candidate_v4s(&watcher.get()),
+                );
+                *multicast_interfaces_task.write().expect("poisoned") = active_interfaces.clone();
+            }
+
             loop {
                 trace!(?endpoint_addrs, "Mdns Service loop tick");
                 let msg = tokio::select! {
                     msg = recv.recv() => {
                         msg
+                    }
+                    state = async { interface_state.as_mut().expect("guarded by if-branch").updated().await }, if interface_state.is_some() => {
+                        match state {
+                            Ok(state) => {
+                                let desired = multicast_candidate_v4s(&state);
+                                if desired != active_interfaces {
+                                    sync_multicast_interfaces(
+                                        &address_lookup,
+                                        &mut active_interfaces,
+                                        desired,
+                                    );
+                                    *multicast_interfaces_task.write().expect("poisoned") =
+                                        active_interfaces.clone();
+                                }
+                            }
+                            Err(_) => {
+                                warn!("network monitor stopped, mDNS multicast interfaces are no longer updated");
+                                interface_state = None;
+                            }
+                        }
+                        continue;
                     }
                     Ok(Some(data)) = addrs_change.updated() => {
                         tracing::trace!(?data, "Mdns address changed");
@@ -373,7 +451,7 @@ impl MdnsAddressLookup {
 
                         let entry = endpoint_addrs.entry(discovered_endpoint_id);
                         if let std::collections::hash_map::Entry::Occupied(ref entry) = entry
-                            && entry.get() == &peer_info
+                            && peer_content_eq(entry.get(), &peer_info)
                         {
                             // this is a republish we already know about
                             continue;
@@ -455,7 +533,19 @@ impl MdnsAddressLookup {
             sender: send,
             advertise,
             local_addrs,
+            multicast_interfaces,
         })
+    }
+
+    /// Returns the IPv4 interface addresses currently used for multicast.
+    ///
+    /// Primarily useful for diagnostics. The set is empty until the network
+    /// monitor has reported the initial interface state, and stays empty when
+    /// the host has no usable non-loopback IPv4 interface; in both cases
+    /// swarm-discovery operates on a single wildcard socket bound to the
+    /// default interface.
+    pub fn multicast_interfaces(&self) -> BTreeSet<Ipv4Addr> {
+        self.multicast_interfaces.read().expect("poisoned").clone()
     }
 
     /// Subscribe to discovered endpoints.
@@ -520,6 +610,82 @@ impl MdnsAddressLookup {
         }
         addrs
     }
+}
+
+/// Returns true if two peer snapshots carry the same announcement content,
+/// meaning the same addresses and TXT attributes.
+///
+/// `Peer`'s derived equality also compares the last-seen timestamp, which
+/// differs between copies of the same announcement, for example when it is
+/// received on several interfaces. Comparing content only ensures duplicate
+/// copies are recognized as the republish they are, instead of producing a
+/// stream of repeated discovery events.
+fn peer_content_eq(a: &Peer, b: &Peer) -> bool {
+    a.addrs() == b.addrs() && a.txt_attributes().eq(b.txt_attributes())
+}
+
+/// Returns the IPv4 addresses of all interfaces that should carry mDNS
+/// multicast, based on the current interface state.
+fn multicast_candidate_v4s(state: &netwatch::interfaces::State) -> BTreeSet<Ipv4Addr> {
+    filter_multicast_candidate_v4s(
+        state
+            .interfaces
+            .values()
+            .map(|iface| (iface.is_up(), iface.addrs().map(|net| net.addr()))),
+    )
+}
+
+/// Filters interface addresses down to the IPv4 addresses usable for
+/// multicast: the interface must be up, and loopback, unspecified, and
+/// broadcast addresses are skipped.
+///
+/// Loopback is excluded because the wildcard socket already covers
+/// same-host discovery via multicast loopback on the egress interface.
+fn filter_multicast_candidate_v4s<I, A>(interfaces: I) -> BTreeSet<Ipv4Addr>
+where
+    I: IntoIterator<Item = (bool, A)>,
+    A: IntoIterator<Item = IpAddr>,
+{
+    let mut out = BTreeSet::new();
+    for (is_up, addrs) in interfaces {
+        if !is_up {
+            continue;
+        }
+        for addr in addrs {
+            if let IpAddr::V4(addr) = addr
+                && !addr.is_loopback()
+                && !addr.is_unspecified()
+                && !addr.is_broadcast()
+            {
+                out.insert(addr);
+            }
+        }
+    }
+    out
+}
+
+/// Brings the swarm-discovery multicast sockets in sync with `desired`,
+/// adding sockets for new interfaces and removing sockets for interfaces
+/// that disappeared. Updates `active` to the desired set.
+///
+/// Socket creation happens asynchronously inside swarm-discovery and
+/// failures are only logged there (for example when an interface vanishes
+/// between observation and socket creation). `active` therefore tracks the
+/// desired state, which self-corrects on the next interface change.
+fn sync_multicast_interfaces(
+    guard: &DropGuard,
+    active: &mut BTreeSet<Ipv4Addr>,
+    desired: BTreeSet<Ipv4Addr>,
+) {
+    for addr in desired.difference(active) {
+        debug!(%addr, "adding interface to mDNS multicast");
+        guard.add_interface_v4(*addr);
+    }
+    for addr in active.difference(&desired) {
+        debug!(%addr, "removing interface from mDNS multicast");
+        guard.remove_interface_v4(*addr);
+    }
+    *active = desired;
 }
 
 fn peer_to_discovery_item(peer: &Peer, endpoint_id: &EndpointId) -> AddressLookupItem {
@@ -595,6 +761,99 @@ impl AddressLookup for MdnsAddressLookup {
 
 #[cfg(test)]
 mod tests {
+
+    /// Pure unit tests that do not open sockets, safe to run concurrently.
+    mod unit {
+        use std::net::Ipv6Addr;
+
+        use super::super::*;
+
+        fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+            IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+        }
+
+        #[test]
+        fn filter_keeps_usable_ipv4_of_up_interfaces() {
+            let got = filter_multicast_candidate_v4s([
+                (true, vec![v4(192, 168, 1, 2)]),
+                (true, vec![v4(10, 0, 0, 7), v4(172, 16, 0, 1)]),
+            ]);
+            let expected: BTreeSet<Ipv4Addr> = [
+                Ipv4Addr::new(192, 168, 1, 2),
+                Ipv4Addr::new(10, 0, 0, 7),
+                Ipv4Addr::new(172, 16, 0, 1),
+            ]
+            .into();
+            assert_eq!(got, expected);
+        }
+
+        #[test]
+        fn filter_skips_down_interfaces() {
+            let got = filter_multicast_candidate_v4s([
+                (false, vec![v4(192, 168, 1, 2)]),
+                (true, vec![v4(10, 0, 0, 7)]),
+            ]);
+            assert_eq!(got, BTreeSet::from([Ipv4Addr::new(10, 0, 0, 7)]));
+        }
+
+        #[test]
+        fn filter_skips_loopback_unspecified_and_broadcast() {
+            let got = filter_multicast_candidate_v4s([(
+                true,
+                vec![
+                    v4(127, 0, 0, 1),
+                    v4(0, 0, 0, 0),
+                    v4(255, 255, 255, 255),
+                    v4(192, 168, 1, 2),
+                ],
+            )]);
+            assert_eq!(got, BTreeSet::from([Ipv4Addr::new(192, 168, 1, 2)]));
+        }
+
+        #[test]
+        fn filter_skips_ipv6() {
+            let got = filter_multicast_candidate_v4s([(
+                true,
+                vec![
+                    IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+                    v4(192, 168, 1, 2),
+                ],
+            )]);
+            assert_eq!(got, BTreeSet::from([Ipv4Addr::new(192, 168, 1, 2)]));
+        }
+
+        #[test]
+        fn filter_dedups_addresses_shared_by_interfaces() {
+            let got = filter_multicast_candidate_v4s([
+                (true, vec![v4(192, 168, 1, 2)]),
+                (true, vec![v4(192, 168, 1, 2)]),
+            ]);
+            assert_eq!(got, BTreeSet::from([Ipv4Addr::new(192, 168, 1, 2)]));
+        }
+
+        #[test]
+        fn filter_empty_input_yields_empty_set() {
+            let got = filter_multicast_candidate_v4s(Vec::<(bool, Vec<IpAddr>)>::new());
+            assert!(got.is_empty());
+        }
+
+        #[test]
+        fn candidates_from_interface_state() {
+            let state = netwatch::interfaces::State::fake();
+            // The fake state contains one up interface with 192.168.0.189.
+            assert_eq!(
+                multicast_candidate_v4s(&state),
+                BTreeSet::from([Ipv4Addr::new(192, 168, 0, 189)])
+            );
+        }
+
+        #[test]
+        fn candidates_from_state_without_interfaces() {
+            let mut state = netwatch::interfaces::State::fake();
+            state.interfaces.clear();
+            assert!(multicast_candidate_v4s(&state).is_empty());
+        }
+    }
 
     /// This module's name signals nextest to run test in a single thread (no other concurrent
     /// tests).
@@ -916,6 +1175,86 @@ mod tests {
             assert_eq!(discovered_relay_urls[0], &relay_url);
 
             Ok(())
+        }
+
+        /// The service task must converge `multicast_interfaces()` to the
+        /// host's current usable IPv4 interfaces (which may be empty, in
+        /// which case the wildcard-socket fallback is active).
+        #[tokio::test]
+        #[traced_test]
+        async fn multicast_interfaces_match_host_state() -> Result {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
+            let (_, address_lookup) = make_address_lookup(&mut rng, true)?;
+
+            let expected = multicast_candidate_v4s(&netwatch::interfaces::State::new().await);
+            let converge = async {
+                while address_lookup.multicast_interfaces() != expected {
+                    time::sleep(Duration::from_millis(50)).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(5), converge)
+                .await
+                .std_context("multicast interfaces did not converge to host state")?;
+            assert_eq!(address_lookup.multicast_interfaces(), expected);
+            Ok(())
+        }
+
+        /// Republished announcements with unchanged content must not produce
+        /// repeated `Discovered` events. The same announcement is received
+        /// multiple times: as responses to repeated queries, and once per
+        /// interface on multi-homed hosts. Without content-based
+        /// deduplication these copies flood subscribers and can drown out
+        /// other events.
+        #[tokio::test]
+        #[traced_test]
+        async fn republished_info_yields_single_discovery_event() -> Result {
+            let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(0u64);
+
+            let (_, address_lookup_a) = make_address_lookup(&mut rng, false)?;
+            let (endpoint_id_b, address_lookup_b) = make_address_lookup(&mut rng, true)?;
+
+            let endpoint_data =
+                EndpointData::from_iter([TransportAddr::Ip("0.0.0.0:11111".parse().unwrap())]);
+            address_lookup_b.publish(&endpoint_data);
+
+            let mut events = address_lookup_a.subscribe().await;
+
+            // Wait for the first Discovered event for endpoint B. Other
+            // endpoints on the local network may surface here as well.
+            let first = async {
+                loop {
+                    match events.next().await {
+                        Some(DiscoveryEvent::Discovered { endpoint_info, .. })
+                            if endpoint_info.endpoint_id == endpoint_id_b =>
+                        {
+                            return Ok::<_, Error>(());
+                        }
+                        Some(_) => continue,
+                        None => bail_any!("event stream ended unexpectedly"),
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(5), first)
+                .await
+                .std_context("timeout waiting for first discovery")??;
+
+            // Observe for a while: endpoint B keeps answering queries with
+            // the same content, so no further Discovered event may arrive.
+            let observe = async {
+                while let Some(event) = events.next().await {
+                    if let DiscoveryEvent::Discovered { endpoint_info, .. } = event
+                        && endpoint_info.endpoint_id == endpoint_id_b
+                    {
+                        bail_any!("received duplicate Discovered event for unchanged content");
+                    }
+                }
+                Ok(())
+            };
+            match tokio::time::timeout(Duration::from_secs(3), observe).await {
+                // Timeout means no duplicate arrived, which is what we want.
+                Err(_) => Ok(()),
+                Ok(result) => result,
+            }
         }
 
         fn make_address_lookup<R: CryptoRng + ?Sized>(
