@@ -91,7 +91,7 @@ use n0_future::{
     task::{self, AbortOnDropHandle, JoinSet},
     time::{self, Duration},
 };
-use n0_watcher::{Watchable, Watcher as _};
+use n0_watcher::{Direct, Watchable, Watcher as _};
 use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{Instrument, debug, error, info_span, trace, warn};
@@ -124,10 +124,11 @@ pub struct MdnsAddressLookup {
     advertise: bool,
     /// When `local_addrs` changes, we re-publish our info.
     local_addrs: Watchable<Option<EndpointData>>,
-    /// IPv4 interface addresses currently used for multicast.
+    /// Observer of the IPv4 interface addresses currently used for multicast.
     ///
-    /// Kept in sync with the host's network interfaces by the service task.
-    multicast_interfaces: Watchable<BTreeSet<Ipv4Addr>>,
+    /// The setting side lives in the service task, which keeps the set in
+    /// sync with the host's network interfaces.
+    multicast_interfaces_observer: Direct<BTreeSet<Ipv4Addr>>,
 }
 
 #[derive(Debug)]
@@ -309,7 +310,7 @@ impl MdnsAddressLookup {
         let local_addrs: Watchable<Option<EndpointData>> = Watchable::default();
         let mut addrs_change = local_addrs.watch();
         let multicast_interfaces: Watchable<BTreeSet<Ipv4Addr>> = Watchable::default();
-        let multicast_interfaces_task = multicast_interfaces.clone();
+        let multicast_interfaces_observer = multicast_interfaces.watch();
         let address_lookup_fut = async move {
             let mut endpoint_addrs: HashMap<PublicKey, Peer> = HashMap::default();
             let mut subscribers = Subscribers::new();
@@ -328,18 +329,17 @@ impl MdnsAddressLookup {
             // interface of the default route. On multi-homed hosts that
             // makes mDNS invisible on every other interface, and the
             // membership silently moves when the default route changes.
-            // The `_monitor` binding keeps the OS route/interface watcher
-            // alive for the lifetime of the service task.
-            let _monitor = match netwatch::netmon::Monitor::new().await {
-                Ok(monitor) => Some(monitor),
-                Err(err) => {
+            // `monitor` keeps the OS route/interface watcher alive for the
+            // lifetime of the service task.
+            let monitor = netwatch::netmon::Monitor::new()
+                .await
+                .inspect_err(|err| {
                     error!(
                         "failed to start network monitor, mDNS multicast stays on the default interface only: {err:#}"
-                    );
-                    None
-                }
-            };
-            let mut interface_state = _monitor.as_ref().map(|m| m.interface_state());
+                    )
+                })
+                .ok();
+            let mut interface_state = monitor.as_ref().map(|m| m.interface_state());
             let mut active_interfaces = BTreeSet::new();
             if let Some(watcher) = interface_state.as_mut() {
                 sync_multicast_interfaces(
@@ -347,9 +347,7 @@ impl MdnsAddressLookup {
                     &mut active_interfaces,
                     multicast_candidate_v4s(&watcher.get()),
                 );
-                multicast_interfaces_task
-                    .set(active_interfaces.clone())
-                    .ok();
+                multicast_interfaces.set(active_interfaces.clone()).ok();
             }
 
             loop {
@@ -372,9 +370,7 @@ impl MdnsAddressLookup {
                                         &mut active_interfaces,
                                         desired,
                                     );
-                                    multicast_interfaces_task
-                                        .set(active_interfaces.clone())
-                                        .ok();
+                                    multicast_interfaces.set(active_interfaces.clone()).ok();
                                 }
                             }
                             Err(_) => {
@@ -537,7 +533,7 @@ impl MdnsAddressLookup {
             sender: send,
             advertise,
             local_addrs,
-            multicast_interfaces,
+            multicast_interfaces_observer,
         })
     }
 
@@ -549,7 +545,7 @@ impl MdnsAddressLookup {
     /// swarm-discovery operates on a single wildcard socket bound to the
     /// default interface.
     pub fn multicast_interfaces(&self) -> BTreeSet<Ipv4Addr> {
-        self.multicast_interfaces.get()
+        self.multicast_interfaces_observer.clone().get()
     }
 
     /// Subscribe to discovered endpoints.
