@@ -162,6 +162,7 @@ pub struct MdnsAddressLookupBuilder {
     advertise: bool,
     service_name: String,
     filter: AddrFilter,
+    cadence: Duration,
 }
 
 impl MdnsAddressLookupBuilder {
@@ -171,6 +172,7 @@ impl MdnsAddressLookupBuilder {
             advertise: true,
             service_name: N0_SERVICE_NAME.to_string(),
             filter: AddrFilter::default(),
+            cadence: Duration::from_millis(700),
         }
     }
 
@@ -195,6 +197,20 @@ impl MdnsAddressLookupBuilder {
         self
     }
 
+    /// Sets the base multicast query cadence (plus swarm-size jitter).
+    ///
+    /// The default is 700 ms. Longer intervals reduce background traffic and
+    /// also lengthen peer-expiry detection. Must be nonzero and at most 5 seconds
+    /// to leave room for discovery within the 10-second lookup deadline.
+    ///
+    /// # Panics
+    /// Panics if the cadence is zero or greater than five seconds.
+    pub fn discovery_cadence(mut self, cadence: Duration) -> Self {
+        assert!(!cadence.is_zero() && cadence <= Duration::from_secs(5));
+        self.cadence = cadence;
+        self
+    }
+
     /// Sets a filter to control which addresses are published by this service.
     pub fn addr_filter(mut self, filter: AddrFilter) -> Self {
         self.filter = filter;
@@ -212,7 +228,13 @@ impl MdnsAddressLookupBuilder {
         self,
         endpoint_id: EndpointId,
     ) -> Result<MdnsAddressLookup, AddressLookupBuilderError> {
-        MdnsAddressLookup::new(endpoint_id, self.advertise, self.service_name, self.filter)
+        MdnsAddressLookup::new(
+            endpoint_id,
+            self.advertise,
+            self.service_name,
+            self.filter,
+            self.cadence,
+        )
     }
 }
 
@@ -271,6 +293,7 @@ impl MdnsAddressLookup {
         advertise: bool,
         service_name: String,
         filter: AddrFilter,
+        cadence: Duration,
     ) -> Result<Self, AddressLookupBuilderError> {
         debug!("Creating new Mdns service");
         let (send, mut recv) = mpsc::channel(64);
@@ -282,13 +305,14 @@ impl MdnsAddressLookup {
             task_sender.clone(),
             BTreeSet::new(),
             service_name,
+            cadence,
             &rt,
         )?;
 
         let local_addrs: Watchable<Option<EndpointData>> = Watchable::default();
         let mut addrs_change = local_addrs.watch();
         let address_lookup_fut = async move {
-            let mut endpoint_addrs: HashMap<PublicKey, Peer> = HashMap::default();
+            let mut endpoint_addrs: HashMap<PublicKey, AddressLookupItem> = HashMap::default();
             let mut subscribers = Subscribers::new();
             let mut last_id = 0;
             let mut senders: HashMap<
@@ -371,22 +395,16 @@ impl MdnsAddressLookup {
                             continue;
                         }
 
-                        let entry = endpoint_addrs.entry(discovered_endpoint_id);
-                        if let std::collections::hash_map::Entry::Occupied(ref entry) = entry
-                            && entry.get() == &peer_info
-                        {
-                            // this is a republish we already know about
+                        let item = peer_to_discovery_item(&peer_info, &discovered_endpoint_id);
+                        if !cache_discovery(&mut endpoint_addrs, item.clone()) {
                             continue;
                         }
-
                         debug!(
                             ?discovered_endpoint_id,
                             ?peer_info,
                             "adding endpoint to Mdns address book"
                         );
-
                         let mut resolved = false;
-                        let item = peer_to_discovery_item(&peer_info, &discovered_endpoint_id);
                         if let Some(senders) = senders.get(&discovered_endpoint_id) {
                             trace!(?item, senders = senders.len(), "sending AddressLookupItem");
                             resolved = true;
@@ -394,7 +412,6 @@ impl MdnsAddressLookup {
                                 sender.send(Ok(item.clone())).await.ok();
                             }
                         }
-                        entry.or_insert(peer_info);
 
                         // only send endpoints to the `subscriber` if they weren't explicitly resolved
                         // in other words, endpoints sent to the `subscribers` should only be the ones that
@@ -410,10 +427,9 @@ impl MdnsAddressLookup {
                         let id = last_id + 1;
                         last_id = id;
                         trace!(?endpoint_id, "Mdns Message::SendAddrs");
-                        if let Some(peer_info) = endpoint_addrs.get(&endpoint_id) {
-                            let item = peer_to_discovery_item(peer_info, &endpoint_id);
+                        if let Some(item) = endpoint_addrs.get(&endpoint_id) {
                             debug!(?item, "sending AddressLookupItem");
-                            sender.send(Ok(item)).await.ok();
+                            sender.send(Ok(item.clone())).await.ok();
                         }
                         if let Some(senders_for_endpoint_id) = senders.get_mut(&endpoint_id) {
                             senders_for_endpoint_id.insert(id, sender);
@@ -475,6 +491,7 @@ impl MdnsAddressLookup {
         sender: mpsc::Sender<Message>,
         socketaddrs: BTreeSet<SocketAddr>,
         service_name: String,
+        cadence: Duration,
         rt: &tokio::runtime::Handle,
     ) -> Result<DropGuard, AddressLookupBuilderError> {
         let spawn_rt = rt.clone();
@@ -495,6 +512,7 @@ impl MdnsAddressLookup {
             .encode(endpoint_id.as_bytes())
             .to_ascii_lowercase();
         let mut discoverer = Discoverer::new_interactive(service_name, endpoint_id_str)
+            .with_cadence(cadence)
             .with_callback(callback)
             .with_ip_class(IpClass::Auto);
         if advertise {
@@ -520,6 +538,20 @@ impl MdnsAddressLookup {
         }
         addrs
     }
+}
+
+/// Compare advertised content, not the observation timestamp. Replace changed
+/// records so a later resolve never returns the first (now stale) address.
+fn cache_discovery(
+    cache: &mut HashMap<PublicKey, AddressLookupItem>,
+    item: AddressLookupItem,
+) -> bool {
+    let id = item.endpoint_id();
+    let changed = cache
+        .get(&id)
+        .is_none_or(|old| old.endpoint_info() != item.endpoint_info());
+    cache.insert(id, item);
+    changed
 }
 
 fn peer_to_discovery_item(peer: &Peer, endpoint_id: &EndpointId) -> AddressLookupItem {
@@ -595,6 +627,72 @@ impl AddressLookup for MdnsAddressLookup {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn refreshes_are_quiet_and_changed_addresses_replace_the_cache() {
+        let id = iroh_base::SecretKey::from_bytes(&[7; 32]).public();
+        let make = |port| {
+            let data = EndpointData::from_iter([iroh_base::TransportAddr::Ip(
+                ([192, 168, 1, 8], port).into(),
+            )]);
+            AddressLookupItem::new(EndpointInfo::from_parts(id, data), NAME, None)
+        };
+        let mut cache = HashMap::new();
+        assert!(cache_discovery(&mut cache, make(1234)));
+        assert!(!cache_discovery(&mut cache, make(1234)));
+        assert!(cache_discovery(&mut cache, make(5678)));
+        assert_eq!(cache[&id].endpoint_info(), make(5678).endpoint_info());
+        assert!(!cache_discovery(&mut cache, make(5678)));
+        // Expiry forgets the record, so the same peer is announced on return.
+        cache.remove(&id);
+        assert!(cache_discovery(&mut cache, make(5678)));
+    }
+
+    #[test]
+    fn relay_and_user_data_changes_are_not_suppressed() {
+        let id = iroh_base::SecretKey::from_bytes(&[7; 32]).public();
+        let mut cache = HashMap::new();
+        let mut data = EndpointData::default();
+        for relay in ["https://one.example", "https://two.example"] {
+            data.add_relay_url(relay.parse().unwrap());
+            assert!(cache_discovery(
+                &mut cache,
+                AddressLookupItem::new(EndpointInfo::from_parts(id, data.clone()), NAME, None,)
+            ));
+        }
+        data.set_user_data(Some("new metadata".parse().unwrap()));
+        assert!(cache_discovery(
+            &mut cache,
+            AddressLookupItem::new(EndpointInfo::from_parts(id, data), NAME, None,)
+        ));
+    }
+
+    #[test]
+    fn background_cadence_preserves_interactive_default() {
+        assert_eq!(
+            MdnsAddressLookup::builder().cadence,
+            Duration::from_millis(700)
+        );
+        assert_eq!(
+            MdnsAddressLookup::builder()
+                .discovery_cadence(Duration::from_secs(5))
+                .cadence,
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn zero_cadence_is_rejected() {
+        MdnsAddressLookup::builder().discovery_cadence(Duration::ZERO);
+    }
+
+    #[test]
+    #[should_panic]
+    fn cadence_over_five_seconds_is_rejected() {
+        MdnsAddressLookup::builder().discovery_cadence(Duration::from_millis(5001));
+    }
 
     /// This module's name signals nextest to run test in a single thread (no other concurrent
     /// tests).
