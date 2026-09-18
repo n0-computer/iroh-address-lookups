@@ -91,8 +91,18 @@ pub const NAME: &str = "mdns";
 /// the TXT record supported by swarm-discovery.
 const USER_DATA_ATTRIBUTE: &str = "user-data";
 
-/// How long we will wait before we stop attempting to resolve an endpoint ID to an address.
-const LOOKUP_DURATION: Duration = Duration::from_secs(10);
+/// Minimum time to wait while resolving an endpoint ID to an address.
+const MIN_LOOKUP_DURATION: Duration = Duration::from_secs(10);
+
+fn lookup_duration(cadence: Duration) -> Duration {
+    // swarm-discovery's worst-case query delay is 1.2 times the cadence.
+    // Leave five more seconds for the response to reach the resolver.
+    MIN_LOOKUP_DURATION.max(
+        cadence
+            .saturating_add(cadence / 5)
+            .saturating_add(Duration::from_secs(5)),
+    )
+}
 
 /// The key of the attribute under which the `RelayUrl` is stored in
 /// the TXT record supported by swarm-discovery.
@@ -200,13 +210,14 @@ impl MdnsAddressLookupBuilder {
     /// Sets the base multicast query cadence (plus swarm-size jitter).
     ///
     /// The default is 700 ms. Longer intervals reduce background traffic and
-    /// also lengthen peer-expiry detection. Must be nonzero and at most 5 seconds
-    /// to leave room for discovery within the 10-second lookup deadline.
+    /// also lengthen peer-expiry detection. Must be nonzero.
+    /// The address lookup deadline grows with the cadence, so longer intervals
+    /// also make unsuccessful lookups take longer.
     ///
     /// # Panics
-    /// Panics if the cadence is zero or greater than five seconds.
+    /// Panics if the cadence is zero.
     pub fn discovery_cadence(mut self, cadence: Duration) -> Self {
-        assert!(!cadence.is_zero() && cadence <= Duration::from_secs(5));
+        assert!(!cadence.is_zero());
         self.cadence = cadence;
         self
     }
@@ -296,6 +307,7 @@ impl MdnsAddressLookup {
         cadence: Duration,
     ) -> Result<Self, AddressLookupBuilderError> {
         debug!("Creating new Mdns service");
+        let lookup_duration = lookup_duration(cadence);
         let (send, mut recv) = mpsc::channel(64);
         let task_sender = send.clone();
         let rt = tokio::runtime::Handle::current();
@@ -440,7 +452,7 @@ impl MdnsAddressLookup {
                         }
                         let timeout_sender = task_sender.clone();
                         timeouts.spawn(async move {
-                            time::sleep(LOOKUP_DURATION).await;
+                            time::sleep(lookup_duration).await;
                             trace!(?endpoint_id, "resolution timeout");
                             timeout_sender
                                 .send(Message::Timeout(endpoint_id, id))
@@ -676,9 +688,9 @@ mod tests {
         );
         assert_eq!(
             MdnsAddressLookup::builder()
-                .discovery_cadence(Duration::from_secs(5))
+                .discovery_cadence(Duration::from_secs(30))
                 .cadence,
-            Duration::from_secs(5)
+            Duration::from_secs(30)
         );
     }
 
@@ -689,9 +701,29 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn cadence_over_five_seconds_is_rejected() {
-        MdnsAddressLookup::builder().discovery_cadence(Duration::from_millis(5001));
+    fn long_background_cadence_is_accepted() {
+        assert_eq!(
+            MdnsAddressLookup::builder()
+                .discovery_cadence(Duration::from_secs(60))
+                .cadence,
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn lookup_deadline_tracks_cadence() {
+        assert_eq!(
+            lookup_duration(Duration::from_millis(700)),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            lookup_duration(Duration::from_secs(30)),
+            Duration::from_secs(41)
+        );
+        assert_eq!(
+            lookup_duration(Duration::from_secs(60)),
+            Duration::from_secs(77)
+        );
     }
 
     /// This module's name signals nextest to run test in a single thread (no other concurrent
