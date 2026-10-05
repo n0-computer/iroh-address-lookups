@@ -1664,6 +1664,7 @@ dependencies = [
  "n0-future",
  "n0-tracing-test",
  "n0-watcher",
+ "netwatch",
  "rand",
  "rand_chacha",
  "swarm-discovery",
@@ -3245,9 +3246,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "swarm-discovery"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36ae41d2d4ad85250007d0f061fddeec5212a15d5c4abad52c475265775572ac"
+checksum = "767b9081b45ad2fd1d31b80d08d64f4208a35cef860505f9ec7478081fa06c77"
 dependencies = [
  "acto",
  "hickory-proto",
