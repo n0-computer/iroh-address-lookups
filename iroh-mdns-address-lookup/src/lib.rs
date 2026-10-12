@@ -94,16 +94,6 @@ const USER_DATA_ATTRIBUTE: &str = "user-data";
 /// Minimum time to wait while resolving an endpoint ID to an address.
 const MIN_LOOKUP_DURATION: Duration = Duration::from_secs(10);
 
-fn lookup_duration(cadence: Duration) -> Duration {
-    // swarm-discovery's worst-case query delay is 1.2 times the cadence.
-    // Leave five more seconds for the response to reach the resolver.
-    MIN_LOOKUP_DURATION.max(
-        cadence
-            .saturating_add(cadence / 5)
-            .saturating_add(Duration::from_secs(5)),
-    )
-}
-
 /// The key of the attribute under which the `RelayUrl` is stored in
 /// the TXT record supported by swarm-discovery.
 const RELAY_URL_ATTRIBUTE: &str = "relay";
@@ -550,6 +540,18 @@ impl MdnsAddressLookup {
         }
         addrs
     }
+}
+
+/// Computes the lookup timeout from the query cadence.
+///
+/// Allows for swarm-discovery's worst-case query delay of 1.2 times the cadence,
+/// plus five seconds for the response, with a minimum of [`MIN_LOOKUP_DURATION`].
+fn lookup_duration(cadence: Duration) -> Duration {
+    MIN_LOOKUP_DURATION.max(
+        cadence
+            .saturating_add(cadence / 5)
+            .saturating_add(Duration::from_secs(5)),
+    )
 }
 
 /// Compare advertised content, not the observation timestamp. Replace changed
