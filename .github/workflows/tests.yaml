@@ -98,26 +98,26 @@ jobs:
           else
             targets="--lib --bins"
           fi
-          echo cargo check -p $i $FEATURES $targets
-          cargo check -p $i $FEATURES $targets
+          echo cargo check --locked -p $i $FEATURES $targets
+          cargo check --locked -p $i $FEATURES $targets
         done
       env:
         RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
 
     - name: build tests
       run: |
-        cargo nextest run --workspace ${{ env.FEATURES }} --lib --bins --tests --no-run
+        cargo nextest run --locked --workspace ${{ env.FEATURES }} --lib --bins --tests --no-run
 
     - name: list ignored tests
       run: |
-        cargo nextest list --workspace ${{ env.FEATURES }} --lib --bins --tests --run-ignored ignored-only
+        cargo nextest list --locked --workspace ${{ env.FEATURES }} --lib --bins --tests --run-ignored ignored-only
       env:
         NEXTEST_NO_TESTS: "pass"
 
     - name: run tests
       run: |
         mkdir -p output
-        cargo nextest run --workspace ${{ env.FEATURES }} --lib --bins --tests --profile ci --run-ignored ${{ inputs.flaky && 'all' || 'default' }} --no-fail-fast --message-format ${{ inputs.flaky && 'libtest-json' || 'human' }} > output/${{ matrix.name }}_${{ matrix.features }}_${{ matrix.rust }}.json
+        cargo nextest run --locked --workspace ${{ env.FEATURES }} --lib --bins --tests --profile ci --run-ignored ${{ inputs.flaky && 'all' || 'default' }} --no-fail-fast --message-format ${{ inputs.flaky && 'libtest-json' || 'human' }} > output/${{ matrix.name }}_${{ matrix.features }}_${{ matrix.rust }}.json
       env:
         RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
         NEXTEST_EXPERIMENTAL_LIBTEST_JSON: 1
@@ -140,7 +140,7 @@ jobs:
         else
             export RUST_LOG=DEBUG
         fi
-        cargo test --workspace --all-features --doc
+        cargo test --locked --workspace --all-features --doc
 
   build_and_test_windows:
     timeout-minutes: 30
@@ -208,18 +208,18 @@ jobs:
 
     - name: build tests
       run: |
-        cargo nextest run --workspace ${{ env.FEATURES }} --lib --bins --tests --target ${{ matrix.target }} --no-run
+        cargo nextest run --locked --workspace ${{ env.FEATURES }} --lib --bins --tests --target ${{ matrix.target }} --no-run
 
     - name: list ignored tests
       run: |
-        cargo nextest list --workspace ${{ env.FEATURES }} --lib --bins --tests --target ${{ matrix.target }} --run-ignored ignored-only
+        cargo nextest list --locked --workspace ${{ env.FEATURES }} --lib --bins --tests --target ${{ matrix.target }} --run-ignored ignored-only
       env:
         NEXTEST_NO_TESTS: "pass"
 
     - name: tests
       run: |
         mkdir -p output
-        cargo nextest run --workspace ${{ env.FEATURES }} --lib --bins --tests --profile ci --target ${{ matrix.target }} --run-ignored ${{ inputs.flaky && 'all' || 'default' }} --no-fail-fast --message-format ${{ inputs.flaky && 'libtest-json' || 'human' }} > output/${{ matrix.name }}_${{ matrix.features }}_${{ matrix.rust }}.json
+        cargo nextest run --locked --workspace ${{ env.FEATURES }} --lib --bins --tests --profile ci --target ${{ matrix.target }} --run-ignored ${{ inputs.flaky && 'all' || 'default' }} --no-fail-fast --message-format ${{ inputs.flaky && 'libtest-json' || 'human' }} > output/${{ matrix.name }}_${{ matrix.features }}_${{ matrix.rust }}.json
       env:
         RUST_LOG: ${{ runner.debug && 'TRACE' || 'DEBUG'}}
         NEXTEST_EXPERIMENTAL_LIBTEST_JSON: 1
@@ -234,6 +234,8 @@ jobs:
         retention-days: 1
         compression-level: 0
   minimal-crates:
+    # Ephemeral only: this job resolves versions the lockfile has never seen
+    # and runs their build scripts.
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -244,16 +246,20 @@ jobs:
             os: ubuntu-latest
             release-os: linux
             release-arch: amd64
-            runner: [self-hosted, linux, X64]
+            runner: ubuntu-latest
           - name: macOS-arm-latest
             os: macOS-latest
             release-os: darwin
             release-arch: aarch64
-            runner: [self-hosted, macOS, ARM64]
+            runner: macos-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
       - name: cargo check
+        # No --locked: re-resolving is the point, so -Z min-publish-age guards
+        # the versions the lockfile has never seen.
         run: |
           rm -f Cargo.lock
-          cargo +nightly check -Z direct-minimal-versions --workspace --all-features --lib --bins
+          cargo +nightly check -Z direct-minimal-versions -Z min-publish-age \
+            --config 'registry.global-min-publish-age="3 days"' \
+            --workspace --all-features --lib --bins
