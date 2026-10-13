@@ -197,7 +197,13 @@ impl MdnsAddressLookupBuilder {
         self
     }
 
-    /// Sets the base multicast query cadence (plus swarm-size jitter).
+    /// Sets the base interval between mDNS discovery query cycles.
+    ///
+    /// Queries ask peers on the local network to announce their addresses.
+    /// Before sending a query, `swarm-discovery` waits for this interval plus
+    /// a random delay that grows with the number of currently known peers.
+    /// If another peer sends a query during that wait, it uses that query
+    /// instead of sending its own, reducing duplicate traffic.
     ///
     /// The default is 700 ms. Longer intervals reduce background traffic and
     /// also lengthen peer-expiry detection. Must be nonzero.
@@ -554,8 +560,11 @@ fn lookup_duration(cadence: Duration) -> Duration {
     )
 }
 
-/// Compare advertised content, not the observation timestamp. Replace changed
-/// records so a later resolve never returns the first (now stale) address.
+/// Caches the latest discovery item for an endpoint.
+///
+/// Returns `true` if the endpoint is new or its advertised content changed.
+/// Observation timestamps do not affect the comparison. The cached item is
+/// always replaced so later lookups use the latest addresses.
 fn cache_discovery(
     cache: &mut HashMap<PublicKey, AddressLookupItem>,
     item: AddressLookupItem,
