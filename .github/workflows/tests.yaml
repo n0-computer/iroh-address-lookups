@@ -24,6 +24,7 @@ env:
   RUSTDOCFLAGS: -Dwarnings
   SCCACHE_CACHE_SIZE: "10G"
   CRATES_LIST: "iroh-mainline-address-lookup,iroh-mdns-address-lookup"
+  NEXTEST_VERSION: "0.9.80"
   IROH_FORCE_STAGING_RELAYS: "1"
 
 # Default to read-only. Jobs that need more grant it explicitly.
@@ -71,7 +72,7 @@ jobs:
     - name: Install cargo-nextest
       uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
       with:
-        tool: nextest@0.9.80
+        tool: nextest@${{ env.NEXTEST_VERSION }}
 
     - name: Install sccache
       uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
@@ -187,14 +188,17 @@ jobs:
         rustup target add $env:RUST_TARGET
         rustup set default-host $env:RUST_TARGET
 
+    # install-action shells out to `bash`. On the self-hosted Windows hosts
+    # that resolves to WSL, which mangles Windows paths. Use Git's bash.
+    - name: Prefer Git bash over WSL
+      run: echo "C:\Program Files\Git\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    # Was a bare Invoke-WebRequest from get.nexte.st with no checksum,
+    # unpacked into ~/.cargo/bin on a long-lived host.
     - name: Install cargo-nextest
-      shell: powershell
-      run: |
-        $tmp = New-TemporaryFile | Rename-Item -NewName { $_ -replace 'tmp$', 'zip' } -PassThru
-        Invoke-WebRequest -OutFile $tmp https://get.nexte.st/latest/windows
-        $outputDir = if ($Env:CARGO_HOME) { Join-Path $Env:CARGO_HOME "bin" } else { "~/.cargo/bin" }
-        $tmp | Expand-Archive -DestinationPath $outputDir -Force
-        $tmp | Remove-Item
+      uses: taiki-e/install-action@82cd3e7658a6f96c86c0234aeeda1748937cb0a1 # v2.85.13
+      with:
+        tool: nextest@${{ env.NEXTEST_VERSION }}
 
     - name: Select features
       run: |
