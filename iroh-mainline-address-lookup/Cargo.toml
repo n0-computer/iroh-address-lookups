@@ -1,6 +1,6 @@
 [package]
 name = "iroh-mainline-address-lookup"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 readme = "README.md"
 description = "BitTorrent Mainline DHT-based address lookup for iroh"
@@ -23,7 +23,7 @@ derive_more = { version = "2.1", features = ["debug"] }
 iroh = { version = "1.0.0", default-features = false }
 iroh-base = { version = "1.0.0", default-features = false, features = ["key", "relay"] }
 iroh-dns = "1.0.0"
-n0-mainline = "0.6"
+n0-mainline = "0.7"
 n0-error = "1.0.0"
 n0-future = "0.3.2"
 tokio = { version = "1.49", default-features = false, features = ["sync"] }
