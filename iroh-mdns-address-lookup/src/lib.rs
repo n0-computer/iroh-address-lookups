@@ -56,10 +56,10 @@
 use std::{
     collections::{BTreeSet, HashMap},
     net::{IpAddr, SocketAddr},
-    str::FromStr,
     sync::Arc,
 };
 
+use futures_util::stream::FuturesUnordered;
 use iroh::{
     Endpoint,
     address_lookup::{
@@ -71,12 +71,15 @@ use iroh_base::{EndpointId, PublicKey};
 use n0_future::{
     Stream, StreamExt,
     boxed::BoxStream,
-    task::{self, AbortOnDropHandle, JoinSet},
+    task::{self, AbortOnDropHandle},
     time::{self, Duration},
 };
 use n0_watcher::{Watchable, Watcher as _};
 use swarm_discovery::{Discoverer, DropGuard, IpClass, Peer};
-use tokio::sync::mpsc::{self, error::TrySendError};
+use tokio::sync::{
+    mpsc::{self, error::TrySendError},
+    watch,
+};
 use tracing::{Instrument, debug, error, info_span, trace, warn};
 
 /// The n0 local service name.
@@ -100,9 +103,8 @@ const RELAY_URL_ATTRIBUTE: &str = "relay";
 
 /// Address Lookup using `swarm-discovery`, a variation on mdns.
 ///
-/// Each resolution buffers up to 20 updates. If its consumer falls behind, it receives
-/// the buffered updates followed by an error and the stream ends. Call `resolve` again
-/// to receive future updates. Other resolutions and discovery subscribers continue normally.
+/// Resolution streams yield the latest known endpoint information. Unread updates
+/// may be coalesced.
 #[derive(Debug, Clone)]
 pub struct MdnsAddressLookup {
     #[allow(dead_code)]
@@ -115,73 +117,11 @@ pub struct MdnsAddressLookup {
 
 #[derive(Debug)]
 enum Message {
-    Discovered(String, Peer),
-    Resolve(EndpointId, ResolutionSender),
-    Timeout(EndpointId, usize),
+    Discovered(EndpointId, Option<AddressLookupItem>),
+    Resolve(EndpointId, watch::Sender<Option<AddressLookupItem>>),
     Subscribe(mpsc::Sender<DiscoveryEvent>),
     #[cfg(test)]
-    TimeoutCount(tokio::sync::oneshot::Sender<usize>),
-    #[cfg(test)]
-    ResolutionUpdate(AddressLookupItem, tokio::sync::oneshot::Sender<bool>),
-}
-
-/// A resolution has a separate terminal status so a full update queue can still report overflow.
-#[derive(Debug)]
-struct ResolutionSender {
-    updates: mpsc::Sender<Result<AddressLookupItem, AddressLookupError>>,
-    overflow: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
-impl ResolutionSender {
-    fn send(&mut self, item: AddressLookupItem) -> bool {
-        match self.updates.try_send(Ok(item)) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
-                self.overflow.take().unwrap().send(()).ok();
-                false
-            }
-            Err(TrySendError::Closed(_)) => false,
-        }
-    }
-}
-
-fn resolution_channel() -> (
-    ResolutionSender,
-    impl Stream<Item = Result<AddressLookupItem, AddressLookupError>> + Unpin,
-) {
-    let (updates, receiver) = mpsc::channel(20);
-    let (overflow, terminal) = tokio::sync::oneshot::channel();
-    let stream = tokio_stream::wrappers::ReceiverStream::new(receiver).chain(
-        futures_util::stream::once(async move {
-            terminal.await.ok().map(|()| {
-                Err(AddressLookupError::from_err(
-                    NAME,
-                    std::io::Error::other("mDNS resolution consumer exceeded its update buffer"),
-                ))
-            })
-        })
-        .filter_map(|item| item),
-    );
-    (
-        ResolutionSender {
-            updates,
-            overflow: Some(overflow),
-        },
-        Box::pin(stream),
-    )
-}
-
-fn send_resolution_update(
-    senders: &mut HashMap<usize, ResolutionSender>,
-    item: &AddressLookupItem,
-) -> bool {
-    let mut accepted = false;
-    senders.retain(|_, sender| {
-        let sent = sender.send(item.clone());
-        accepted |= sent;
-        sent
-    });
-    accepted
+    ResolutionCount(tokio::sync::oneshot::Sender<(usize, usize)>),
 }
 
 /// Manages the list of subscribers that are subscribed to this Address Lookup.
@@ -386,13 +326,21 @@ impl MdnsAddressLookup {
         let address_lookup_fut = async move {
             let mut endpoint_addrs: HashMap<PublicKey, AddressLookupItem> = HashMap::default();
             let mut subscribers = Subscribers::new();
-            let mut last_id = 0;
-            let mut senders: HashMap<PublicKey, HashMap<usize, ResolutionSender>> =
+            let mut senders: HashMap<PublicKey, Vec<watch::Sender<Option<AddressLookupItem>>>> =
                 HashMap::default();
-            let mut timeouts = JoinSet::new();
+            let mut timeouts = FuturesUnordered::new();
             loop {
                 trace!(?endpoint_addrs, "Mdns Service loop tick");
                 let msg = tokio::select! {
+                    Some((endpoint_id, sender)) = timeouts.next(), if !timeouts.is_empty() => {
+                        if let Some(resolutions) = senders.get_mut(&endpoint_id) {
+                            resolutions.retain(|other| !other.same_channel(&sender));
+                            if resolutions.is_empty() {
+                                senders.remove(&endpoint_id);
+                            }
+                        }
+                        continue;
+                    }
                     msg = recv.recv() => {
                         msg
                     }
@@ -424,67 +372,39 @@ impl MdnsAddressLookup {
                     None => {
                         error!("Mdns channel closed");
                         error!("closing Mdns");
-                        timeouts.abort_all();
                         address_lookup.remove_all();
                         return;
                     }
                     Some(msg) => msg,
                 };
                 match msg {
-                    Message::Discovered(discovered_endpoint_id, peer_info) => {
-                        trace!(
-                            ?discovered_endpoint_id,
-                            ?peer_info,
-                            "Mdns Message::Discovered"
-                        );
-                        let discovered_endpoint_id =
-                            match PublicKey::from_str(&discovered_endpoint_id) {
-                                Ok(endpoint_id) => endpoint_id,
-                                Err(e) => {
-                                    warn!(
-                                        discovered_endpoint_id,
-                                        "couldn't parse endpoint_id from mdns Address Lookup: {e:?}"
-                                    );
-                                    continue;
-                                }
-                            };
-
+                    Message::Discovered(discovered_endpoint_id, item) => {
                         if discovered_endpoint_id == endpoint_id {
                             continue;
                         }
-
-                        if peer_info.is_expiry() {
-                            trace!(
-                                ?discovered_endpoint_id,
-                                "removing endpoint from Mdns address book"
-                            );
+                        let Some(item) = item else {
                             endpoint_addrs.remove(&discovered_endpoint_id);
+                            if let Some(resolutions) = senders.get(&discovered_endpoint_id) {
+                                for sender in resolutions {
+                                    sender.send(None).ok();
+                                }
+                            }
                             subscribers.send(DiscoveryEvent::Expired {
                                 endpoint_id: discovered_endpoint_id,
                             });
                             continue;
-                        }
-
-                        let item = peer_to_discovery_item(&peer_info, &discovered_endpoint_id);
+                        };
                         if !cache_discovery(&mut endpoint_addrs, item.clone()) {
                             continue;
                         }
-                        debug!(
-                            ?discovered_endpoint_id,
-                            ?peer_info,
-                            "adding endpoint to Mdns address book"
-                        );
                         let mut resolved = false;
                         if let Some(resolutions) = senders.get_mut(&discovered_endpoint_id) {
-                            resolved = send_resolution_update(resolutions, &item);
-                            if resolutions.is_empty() {
+                            resolutions.retain(|sender| sender.send(Some(item.clone())).is_ok());
+                            resolved = !resolutions.is_empty();
+                            if !resolved {
                                 senders.remove(&discovered_endpoint_id);
                             }
                         }
-
-                        // only send endpoints to the `subscriber` if they weren't explicitly resolved
-                        // in other words, endpoints sent to the `subscribers` should only be the ones that
-                        // have been "passively" discovered
                         if !resolved {
                             subscribers.send(DiscoveryEvent::Discovered {
                                 endpoint_info: item.endpoint_info().clone(),
@@ -492,51 +412,28 @@ impl MdnsAddressLookup {
                             });
                         }
                     }
-                    Message::Resolve(endpoint_id, mut sender) => {
-                        let id = last_id + 1;
-                        last_id = id;
-                        trace!(?endpoint_id, "Mdns Message::SendAddrs");
-                        if let Some(item) = endpoint_addrs.get(&endpoint_id)
-                            && !sender.send(item.clone())
+                    Message::Resolve(endpoint_id, sender) => {
+                        if sender
+                            .send(endpoint_addrs.get(&endpoint_id).cloned())
+                            .is_err()
                         {
                             continue;
                         }
-                        if let Some(senders_for_endpoint_id) = senders.get_mut(&endpoint_id) {
-                            senders_for_endpoint_id.insert(id, sender);
-                        } else {
-                            let mut senders_for_endpoint_id = HashMap::new();
-                            senders_for_endpoint_id.insert(id, sender);
-                            senders.insert(endpoint_id, senders_for_endpoint_id);
-                        }
-                        let timeout_sender = task_sender.clone();
-                        timeouts.spawn(async move {
-                            time::sleep(lookup_duration).await;
-                            trace!(?endpoint_id, "resolution timeout");
-                            timeout_sender
-                                .send(Message::Timeout(endpoint_id, id))
-                                .await
-                                .ok();
+                        senders.entry(endpoint_id).or_default().push(sender.clone());
+                        let timeout = time::sleep(lookup_duration);
+                        timeouts.push(async move {
+                            tokio::select! {
+                                _ = timeout => {},
+                                _ = sender.closed() => {},
+                            }
+                            (endpoint_id, sender)
                         });
                     }
-                    Message::Timeout(endpoint_id, id) => {
-                        trace!(?endpoint_id, "Mdns Message::Timeout");
-                        if let Some(senders_for_endpoint_id) = senders.get_mut(&endpoint_id) {
-                            senders_for_endpoint_id.remove(&id);
-                            if senders_for_endpoint_id.is_empty() {
-                                senders.remove(&endpoint_id);
-                            }
-                        }
-                    }
                     #[cfg(test)]
-                    Message::ResolutionUpdate(item, reply) => {
-                        let accepted = senders
-                            .get_mut(&item.endpoint_id())
-                            .is_some_and(|senders| send_resolution_update(senders, &item));
-                        reply.send(accepted).ok();
-                    }
-                    #[cfg(test)]
-                    Message::TimeoutCount(reply) => {
-                        reply.send(timeouts.len()).ok();
+                    Message::ResolutionCount(reply) => {
+                        reply
+                            .send((senders.values().map(Vec::len).sum(), timeouts.len()))
+                            .ok();
                     }
                     Message::Subscribe(subscriber) => {
                         trace!("Mdns Message::Subscribe");
@@ -579,12 +476,18 @@ impl MdnsAddressLookup {
         let callback = move |endpoint_id: &str, peer: &Peer| {
             trace!(endpoint_id, ?peer, "Received peer information from Mdns");
 
+            let endpoint_id = match endpoint_id.parse::<EndpointId>() {
+                Ok(endpoint_id) => endpoint_id,
+                Err(error) => {
+                    warn!(endpoint_id, %error, "could not parse discovered endpoint ID");
+                    return;
+                }
+            };
+            let item = (!peer.is_expiry()).then(|| peer_to_discovery_item(peer, &endpoint_id));
             let sender = sender.clone();
-            let endpoint_id = endpoint_id.to_string();
-            let peer = peer.clone();
             spawn_rt.spawn(async move {
                 sender
-                    .send(Message::Discovered(endpoint_id, peer))
+                    .send(Message::Discovered(endpoint_id, item))
                     .await
                     .ok();
             });
@@ -702,14 +605,14 @@ impl AddressLookup for MdnsAddressLookup {
     ) -> Option<BoxStream<Result<AddressLookupItem, AddressLookupError>>> {
         use futures_util::FutureExt;
 
-        let (send, recv) = resolution_channel();
+        let (send, recv) = watch::channel(None);
         let address_lookup_sender = self.sender.clone();
         let stream = async move {
             address_lookup_sender
                 .send(Message::Resolve(endpoint_id, send))
                 .await
                 .ok();
-            recv
+            tokio_stream::wrappers::WatchStream::new(recv).filter_map(|item| item.map(Ok))
         };
         Some(Box::pin(stream.flatten_stream()))
     }
@@ -725,112 +628,180 @@ impl AddressLookup for MdnsAddressLookup {
 mod tests {
     use super::*;
 
-    #[test]
-    fn closed_resolution_does_not_suppress_passive_discovery() {
-        let id = iroh_base::SecretKey::from_bytes(&[8; 32]).public();
-        let item = AddressLookupItem::new(
-            EndpointInfo::from_parts(id, EndpointData::default()),
-            NAME,
-            None,
-        );
-        let (sender, receiver) = resolution_channel();
-        drop(receiver);
-        let mut senders = HashMap::from([(0, sender)]);
-        assert!(!send_resolution_update(&mut senders, &item));
-        assert!(senders.is_empty());
+    use futures_util::FutureExt;
+
+    fn discovered(endpoint_id: EndpointId, port: u16) -> Message {
+        Message::Discovered(
+            endpoint_id,
+            Some(AddressLookupItem::new(
+                EndpointInfo::from_parts(
+                    endpoint_id,
+                    EndpointData::from_iter([iroh_base::TransportAddr::Ip(
+                        ([192, 168, 1, 8], port).into(),
+                    )]),
+                ),
+                NAME,
+                None,
+            )),
+        )
     }
 
-    #[tokio::test]
-    async fn full_resolution_does_not_block_the_actor() {
-        let local = iroh_base::SecretKey::from_bytes(&[7; 32]).public();
-        let remote = iroh_base::SecretKey::from_bytes(&[8; 32]).public();
-        let lookup = MdnsAddressLookup::builder()
-            .advertise(false)
-            .build(local)
-            .unwrap();
-        let (slow, mut slow_stream) = resolution_channel();
-        lookup
-            .sender
-            .send(Message::Resolve(remote, slow))
-            .await
-            .unwrap();
-        let (healthy, mut healthy_stream) = resolution_channel();
-        lookup
-            .sender
-            .send(Message::Resolve(remote, healthy))
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            for port in 1..=25 {
-                let item = AddressLookupItem::new(
-                    EndpointInfo::from_parts(
-                        remote,
-                        EndpointData::from_iter([iroh_base::TransportAddr::Ip(
-                            ([192, 168, 1, 8], port).into(),
-                        )]),
-                    ),
-                    NAME,
-                    None,
-                );
-                let (reply, accepted) = tokio::sync::oneshot::channel();
+    fn start_resolution(
+        lookup: &MdnsAddressLookup,
+        id: EndpointId,
+    ) -> BoxStream<Result<AddressLookupItem, AddressLookupError>> {
+        let mut stream = lookup.resolve(id).unwrap();
+        assert!(stream.next().now_or_never().is_none());
+        stream
+    }
+
+    async fn wait_for_resolutions(lookup: &MdnsAddressLookup, expected: usize) {
+        time::timeout(Duration::from_secs(1), async {
+            loop {
+                let (sender, receiver) = tokio::sync::oneshot::channel();
                 lookup
                     .sender
-                    .send(Message::ResolutionUpdate(item.clone(), reply))
+                    .send(Message::ResolutionCount(sender))
                     .await
                     .unwrap();
-                assert!(accepted.await.unwrap());
-                assert_eq!(
-                    healthy_stream
-                        .next()
-                        .await
-                        .unwrap()
-                        .unwrap()
-                        .endpoint_info(),
-                    item.endpoint_info()
-                );
+                if receiver.await.unwrap() == (expected, expected) {
+                    break;
+                }
+                tokio::task::yield_now().await;
             }
-            // A new subscription must still be acknowledged after the slow resolution overflows.
-            let _events = lookup.subscribe().await;
-            let (reply, count) = tokio::sync::oneshot::channel();
-            lookup
-                .sender
-                .send(Message::TimeoutCount(reply))
-                .await
-                .unwrap();
-            assert_eq!(count.await.unwrap(), 2);
-            for port in 1..=20 {
-                let item = slow_stream.next().await.unwrap().unwrap();
-                assert_eq!(
-                    item.endpoint_info().data.ip_addrs().next(),
-                    Some(&SocketAddr::from(([192, 168, 1, 8], port)))
-                );
-            }
-            let error = slow_stream.next().await.unwrap().unwrap_err();
-            assert_eq!(
-                std::error::Error::source(&error).unwrap().to_string(),
-                "mDNS resolution consumer exceeded its update buffer"
-            );
-            assert!(slow_stream.next().await.is_none());
         })
         .await
         .unwrap();
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn resolution_timeout_ends_without_overflow() {
+    fn port(item: Result<AddressLookupItem, AddressLookupError>) -> u16 {
+        item.unwrap()
+            .endpoint_info()
+            .data
+            .ip_addrs()
+            .next()
+            .unwrap()
+            .port()
+    }
+
+    #[tokio::test]
+    async fn stalled_resolution_coalesces_updates_without_blocking_other_consumers() {
         let local = iroh_base::SecretKey::from_bytes(&[7; 32]).public();
         let remote = iroh_base::SecretKey::from_bytes(&[8; 32]).public();
         let lookup = MdnsAddressLookup::builder()
             .advertise(false)
             .build(local)
             .unwrap();
-        let (sender, mut stream) = resolution_channel();
+        let mut slow = start_resolution(&lookup, remote);
+        let mut healthy = start_resolution(&lookup, remote);
+        let mut events = lookup.subscribe().await;
+        wait_for_resolutions(&lookup, 2).await;
+        for value in 1..=64 {
+            lookup.sender.send(discovered(remote, value)).await.unwrap();
+            assert_eq!(port(healthy.next().await.unwrap()), value);
+        }
+        assert_eq!(port(slow.next().await.unwrap()), 64);
+        assert!(slow.next().now_or_never().is_none());
+        lookup.sender.send(discovered(remote, 65)).await.unwrap();
+        assert_eq!(port(healthy.next().await.unwrap()), 65);
+        assert_eq!(port(slow.next().await.unwrap()), 65);
+        lookup.sender.send(discovered(remote, 65)).await.unwrap();
+        wait_for_resolutions(&lookup, 2).await;
+        assert!(healthy.next().now_or_never().is_none());
+        assert!(slow.next().now_or_never().is_none());
+        assert!(events.next().now_or_never().is_none());
+        let other = iroh_base::SecretKey::from_bytes(&[9; 32]).public();
+        lookup.sender.send(discovered(other, 70)).await.unwrap();
+        assert!(
+            matches!(events.next().await, Some(DiscoveryEvent::Discovered { endpoint_info, .. })
+            if endpoint_info.endpoint_id == other)
+        );
+        drop((slow, healthy));
+        wait_for_resolutions(&lookup, 0).await;
+        lookup.sender.send(discovered(remote, 66)).await.unwrap();
+        assert!(
+            matches!(events.next().await, Some(DiscoveryEvent::Discovered { endpoint_info, .. })
+            if endpoint_info.endpoint_id == remote)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cached_resolution_clears_expiry_and_drains_latest_state_at_timeout() {
+        let local = iroh_base::SecretKey::from_bytes(&[7; 32]).public();
+        let remote = iroh_base::SecretKey::from_bytes(&[8; 32]).public();
+        let lookup = MdnsAddressLookup::builder()
+            .advertise(false)
+            .build(local)
+            .unwrap();
+        let mut events = lookup.subscribe().await;
+        lookup.sender.send(discovered(remote, 1)).await.unwrap();
+        wait_for_resolutions(&lookup, 0).await;
+        let mut stream = start_resolution(&lookup, remote);
+        wait_for_resolutions(&lookup, 1).await;
         lookup
             .sender
-            .send(Message::Resolve(remote, sender))
+            .send(Message::Discovered(remote, None))
             .await
             .unwrap();
-        assert!(stream.next().await.is_none());
+        wait_for_resolutions(&lookup, 1).await;
+        assert!(stream.next().now_or_never().is_none());
+        assert!(matches!(
+            events.next().await,
+            Some(DiscoveryEvent::Discovered { .. })
+        ));
+        assert!(
+            matches!(events.next().await, Some(DiscoveryEvent::Expired { endpoint_id })
+            if endpoint_id == remote)
+        );
+        let mut fresh = start_resolution(&lookup, remote);
+        wait_for_resolutions(&lookup, 2).await;
+        assert!(fresh.next().now_or_never().is_none());
+        lookup.sender.send(discovered(remote, 2)).await.unwrap();
+        assert_eq!(port(stream.next().await.unwrap()), 2);
+        assert_eq!(port(fresh.next().await.unwrap()), 2);
+        let mut repeated = start_resolution(&lookup, remote);
+        wait_for_resolutions(&lookup, 3).await;
+        assert_eq!(port(repeated.next().await.unwrap()), 2);
+        assert!(repeated.next().now_or_never().is_none());
+        drop(repeated);
+        wait_for_resolutions(&lookup, 2).await;
+        lookup.sender.send(discovered(remote, 3)).await.unwrap();
+        wait_for_resolutions(&lookup, 2).await;
+        tokio::time::advance(MIN_LOOKUP_DURATION).await;
+        wait_for_resolutions(&lookup, 0).await;
+        for mut receiver in [stream, fresh] {
+            assert_eq!(port(receiver.next().await.unwrap()), 3);
+            assert!(receiver.next().await.is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canceled_resolutions_release_state_without_ending_other_resolutions() {
+        let local = iroh_base::SecretKey::from_bytes(&[7; 32]).public();
+        let remote = iroh_base::SecretKey::from_bytes(&[8; 32]).public();
+        let lookup = MdnsAddressLookup::builder()
+            .advertise(false)
+            .build(local)
+            .unwrap();
+        drop(lookup.resolve(remote));
+        wait_for_resolutions(&lookup, 0).await;
+        let first = start_resolution(&lookup, remote);
+        wait_for_resolutions(&lookup, 1).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let mut second = start_resolution(&lookup, remote);
+        wait_for_resolutions(&lookup, 2).await;
+        drop(first);
+        wait_for_resolutions(&lookup, 1).await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        wait_for_resolutions(&lookup, 1).await;
+        assert!(second.next().now_or_never().is_none());
+        tokio::time::advance(Duration::from_secs(5)).await;
+        wait_for_resolutions(&lookup, 0).await;
+        assert!(second.next().await.is_none());
+        let mut last = start_resolution(&lookup, remote);
+        wait_for_resolutions(&lookup, 1).await;
+        drop(lookup);
+        assert!(last.next().await.is_none());
     }
 
     #[test]
