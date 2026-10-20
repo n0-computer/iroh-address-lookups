@@ -69,7 +69,7 @@ use iroh::{
 };
 use iroh_base::{EndpointId, PublicKey};
 use n0_future::{
-    Stream,
+    Stream, StreamExt,
     boxed::BoxStream,
     task::{self, AbortOnDropHandle, JoinSet},
     time::{self, Duration},
@@ -99,6 +99,10 @@ const MIN_LOOKUP_DURATION: Duration = Duration::from_secs(10);
 const RELAY_URL_ATTRIBUTE: &str = "relay";
 
 /// Address Lookup using `swarm-discovery`, a variation on mdns.
+///
+/// Each resolution buffers up to 20 updates. If its consumer falls behind, it receives
+/// the buffered updates followed by an error and the stream ends. Call `resolve` again
+/// to receive future updates. Other resolutions and discovery subscribers continue normally.
 #[derive(Debug, Clone)]
 pub struct MdnsAddressLookup {
     #[allow(dead_code)]
@@ -112,12 +116,72 @@ pub struct MdnsAddressLookup {
 #[derive(Debug)]
 enum Message {
     Discovered(String, Peer),
-    Resolve(
-        EndpointId,
-        mpsc::Sender<Result<AddressLookupItem, AddressLookupError>>,
-    ),
+    Resolve(EndpointId, ResolutionSender),
     Timeout(EndpointId, usize),
     Subscribe(mpsc::Sender<DiscoveryEvent>),
+    #[cfg(test)]
+    TimeoutCount(tokio::sync::oneshot::Sender<usize>),
+    #[cfg(test)]
+    ResolutionUpdate(AddressLookupItem, tokio::sync::oneshot::Sender<bool>),
+}
+
+/// A resolution has a separate terminal status so a full update queue can still report overflow.
+#[derive(Debug)]
+struct ResolutionSender {
+    updates: mpsc::Sender<Result<AddressLookupItem, AddressLookupError>>,
+    overflow: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl ResolutionSender {
+    fn send(&mut self, item: AddressLookupItem) -> bool {
+        match self.updates.try_send(Ok(item)) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.overflow.take().unwrap().send(()).ok();
+                false
+            }
+            Err(TrySendError::Closed(_)) => false,
+        }
+    }
+}
+
+fn resolution_channel() -> (
+    ResolutionSender,
+    impl Stream<Item = Result<AddressLookupItem, AddressLookupError>> + Unpin,
+) {
+    let (updates, receiver) = mpsc::channel(20);
+    let (overflow, terminal) = tokio::sync::oneshot::channel();
+    let stream = tokio_stream::wrappers::ReceiverStream::new(receiver).chain(
+        futures_util::stream::once(async move {
+            terminal.await.ok().map(|()| {
+                Err(AddressLookupError::from_err(
+                    NAME,
+                    std::io::Error::other("mDNS resolution consumer exceeded its update buffer"),
+                ))
+            })
+        })
+        .filter_map(|item| item),
+    );
+    (
+        ResolutionSender {
+            updates,
+            overflow: Some(overflow),
+        },
+        Box::pin(stream),
+    )
+}
+
+fn send_resolution_update(
+    senders: &mut HashMap<usize, ResolutionSender>,
+    item: &AddressLookupItem,
+) -> bool {
+    let mut accepted = false;
+    senders.retain(|_, sender| {
+        let sent = sender.send(item.clone());
+        accepted |= sent;
+        sent
+    });
+    accepted
 }
 
 /// Manages the list of subscribers that are subscribed to this Address Lookup.
@@ -323,10 +387,8 @@ impl MdnsAddressLookup {
             let mut endpoint_addrs: HashMap<PublicKey, AddressLookupItem> = HashMap::default();
             let mut subscribers = Subscribers::new();
             let mut last_id = 0;
-            let mut senders: HashMap<
-                PublicKey,
-                HashMap<usize, mpsc::Sender<Result<AddressLookupItem, AddressLookupError>>>,
-            > = HashMap::default();
+            let mut senders: HashMap<PublicKey, HashMap<usize, ResolutionSender>> =
+                HashMap::default();
             let mut timeouts = JoinSet::new();
             loop {
                 trace!(?endpoint_addrs, "Mdns Service loop tick");
@@ -413,11 +475,10 @@ impl MdnsAddressLookup {
                             "adding endpoint to Mdns address book"
                         );
                         let mut resolved = false;
-                        if let Some(senders) = senders.get(&discovered_endpoint_id) {
-                            trace!(?item, senders = senders.len(), "sending AddressLookupItem");
-                            resolved = true;
-                            for sender in senders.values() {
-                                sender.send(Ok(item.clone())).await.ok();
+                        if let Some(resolutions) = senders.get_mut(&discovered_endpoint_id) {
+                            resolved = send_resolution_update(resolutions, &item);
+                            if resolutions.is_empty() {
+                                senders.remove(&discovered_endpoint_id);
                             }
                         }
 
@@ -431,13 +492,14 @@ impl MdnsAddressLookup {
                             });
                         }
                     }
-                    Message::Resolve(endpoint_id, sender) => {
+                    Message::Resolve(endpoint_id, mut sender) => {
                         let id = last_id + 1;
                         last_id = id;
                         trace!(?endpoint_id, "Mdns Message::SendAddrs");
-                        if let Some(item) = endpoint_addrs.get(&endpoint_id) {
-                            debug!(?item, "sending AddressLookupItem");
-                            sender.send(Ok(item.clone())).await.ok();
+                        if let Some(item) = endpoint_addrs.get(&endpoint_id)
+                            && !sender.send(item.clone())
+                        {
+                            continue;
                         }
                         if let Some(senders_for_endpoint_id) = senders.get_mut(&endpoint_id) {
                             senders_for_endpoint_id.insert(id, sender);
@@ -464,6 +526,17 @@ impl MdnsAddressLookup {
                                 senders.remove(&endpoint_id);
                             }
                         }
+                    }
+                    #[cfg(test)]
+                    Message::ResolutionUpdate(item, reply) => {
+                        let accepted = senders
+                            .get_mut(&item.endpoint_id())
+                            .is_some_and(|senders| send_resolution_update(senders, &item));
+                        reply.send(accepted).ok();
+                    }
+                    #[cfg(test)]
+                    Message::TimeoutCount(reply) => {
+                        reply.send(timeouts.len()).ok();
                     }
                     Message::Subscribe(subscriber) => {
                         trace!("Mdns Message::Subscribe");
@@ -629,14 +702,14 @@ impl AddressLookup for MdnsAddressLookup {
     ) -> Option<BoxStream<Result<AddressLookupItem, AddressLookupError>>> {
         use futures_util::FutureExt;
 
-        let (send, recv) = mpsc::channel(20);
+        let (send, recv) = resolution_channel();
         let address_lookup_sender = self.sender.clone();
         let stream = async move {
             address_lookup_sender
                 .send(Message::Resolve(endpoint_id, send))
                 .await
                 .ok();
-            tokio_stream::wrappers::ReceiverStream::new(recv)
+            recv
         };
         Some(Box::pin(stream.flatten_stream()))
     }
@@ -651,6 +724,114 @@ impl AddressLookup for MdnsAddressLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_resolution_does_not_suppress_passive_discovery() {
+        let id = iroh_base::SecretKey::from_bytes(&[8; 32]).public();
+        let item = AddressLookupItem::new(
+            EndpointInfo::from_parts(id, EndpointData::default()),
+            NAME,
+            None,
+        );
+        let (sender, receiver) = resolution_channel();
+        drop(receiver);
+        let mut senders = HashMap::from([(0, sender)]);
+        assert!(!send_resolution_update(&mut senders, &item));
+        assert!(senders.is_empty());
+    }
+
+    #[tokio::test]
+    async fn full_resolution_does_not_block_the_actor() {
+        let local = iroh_base::SecretKey::from_bytes(&[7; 32]).public();
+        let remote = iroh_base::SecretKey::from_bytes(&[8; 32]).public();
+        let lookup = MdnsAddressLookup::builder()
+            .advertise(false)
+            .build(local)
+            .unwrap();
+        let (slow, mut slow_stream) = resolution_channel();
+        lookup
+            .sender
+            .send(Message::Resolve(remote, slow))
+            .await
+            .unwrap();
+        let (healthy, mut healthy_stream) = resolution_channel();
+        lookup
+            .sender
+            .send(Message::Resolve(remote, healthy))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            for port in 1..=25 {
+                let item = AddressLookupItem::new(
+                    EndpointInfo::from_parts(
+                        remote,
+                        EndpointData::from_iter([iroh_base::TransportAddr::Ip(
+                            ([192, 168, 1, 8], port).into(),
+                        )]),
+                    ),
+                    NAME,
+                    None,
+                );
+                let (reply, accepted) = tokio::sync::oneshot::channel();
+                lookup
+                    .sender
+                    .send(Message::ResolutionUpdate(item.clone(), reply))
+                    .await
+                    .unwrap();
+                assert!(accepted.await.unwrap());
+                assert_eq!(
+                    healthy_stream
+                        .next()
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .endpoint_info(),
+                    item.endpoint_info()
+                );
+            }
+            // A new subscription must still be acknowledged after the slow resolution overflows.
+            let _events = lookup.subscribe().await;
+            let (reply, count) = tokio::sync::oneshot::channel();
+            lookup
+                .sender
+                .send(Message::TimeoutCount(reply))
+                .await
+                .unwrap();
+            assert_eq!(count.await.unwrap(), 2);
+            for port in 1..=20 {
+                let item = slow_stream.next().await.unwrap().unwrap();
+                assert_eq!(
+                    item.endpoint_info().data.ip_addrs().next(),
+                    Some(&SocketAddr::from(([192, 168, 1, 8], port)))
+                );
+            }
+            let error = slow_stream.next().await.unwrap().unwrap_err();
+            assert_eq!(
+                std::error::Error::source(&error).unwrap().to_string(),
+                "mDNS resolution consumer exceeded its update buffer"
+            );
+            assert!(slow_stream.next().await.is_none());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resolution_timeout_ends_without_overflow() {
+        let local = iroh_base::SecretKey::from_bytes(&[7; 32]).public();
+        let remote = iroh_base::SecretKey::from_bytes(&[8; 32]).public();
+        let lookup = MdnsAddressLookup::builder()
+            .advertise(false)
+            .build(local)
+            .unwrap();
+        let (sender, mut stream) = resolution_channel();
+        lookup
+            .sender
+            .send(Message::Resolve(remote, sender))
+            .await
+            .unwrap();
+        assert!(stream.next().await.is_none());
+    }
 
     #[test]
     fn refreshes_are_quiet_and_changed_addresses_replace_the_cache() {
