@@ -331,6 +331,9 @@ impl MdnsAddressLookup {
             loop {
                 trace!(?endpoint_addrs, "Mdns Service loop tick");
                 let msg = tokio::select! {
+                    Some(_) = timeouts.join_next(), if !timeouts.is_empty() => {
+                        continue;
+                    }
                     msg = recv.recv() => {
                         msg
                     }
