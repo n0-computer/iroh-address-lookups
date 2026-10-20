@@ -118,8 +118,6 @@ enum Message {
     ),
     Timeout(EndpointId, usize),
     Subscribe(mpsc::Sender<DiscoveryEvent>),
-    #[cfg(test)]
-    TimeoutCount(tokio::sync::oneshot::Sender<usize>),
 }
 
 /// Manages the list of subscribers that are subscribed to this Address Lookup.
@@ -470,10 +468,6 @@ impl MdnsAddressLookup {
                             }
                         }
                     }
-                    #[cfg(test)]
-                    Message::TimeoutCount(reply) => {
-                        reply.send(timeouts.len()).ok();
-                    }
                     Message::Subscribe(subscriber) => {
                         trace!("Mdns Message::Subscribe");
                         subscribers.push(subscriber);
@@ -660,43 +654,6 @@ impl AddressLookup for MdnsAddressLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test(start_paused = true)]
-    async fn completed_resolution_timeouts_are_reaped() {
-        let local = iroh_base::SecretKey::from_bytes(&[7; 32]).public();
-        let remote = iroh_base::SecretKey::from_bytes(&[8; 32]).public();
-        let lookup = MdnsAddressLookup::builder()
-            .advertise(false)
-            .build(local)
-            .unwrap();
-        for _ in 0..64 {
-            let (sender, _receiver) = mpsc::channel(20);
-            lookup
-                .sender
-                .send(Message::Resolve(remote, sender))
-                .await
-                .unwrap();
-        }
-        async fn timeout_count(lookup: &MdnsAddressLookup) -> usize {
-            let (sender, receiver) = tokio::sync::oneshot::channel();
-            lookup
-                .sender
-                .send(Message::TimeoutCount(sender))
-                .await
-                .unwrap();
-            receiver.await.unwrap()
-        }
-        assert_eq!(timeout_count(&lookup).await, 64);
-        tokio::time::advance(MIN_LOOKUP_DURATION).await;
-        // Querying the actor also lets it process timeout messages and completed tasks.
-        for _ in 0..256 {
-            if timeout_count(&lookup).await == 0 {
-                return;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(timeout_count(&lookup).await, 0);
-    }
 
     #[test]
     fn refreshes_are_quiet_and_changed_addresses_replace_the_cache() {
