@@ -1,0 +1,9 @@
+(function() {
+    var implementors = Object.fromEntries([["iroh_mainline_address_lookup",[["impl UnsafeUnpin for <a class=\"struct\" href=\"iroh_mainline_address_lookup/struct.Builder.html\" title=\"struct iroh_mainline_address_lookup::Builder\">Builder</a>",1,["iroh_mainline_address_lookup::Builder"]],["impl UnsafeUnpin for <a class=\"struct\" href=\"iroh_mainline_address_lookup/struct.DhtAddressLookup.html\" title=\"struct iroh_mainline_address_lookup::DhtAddressLookup\">DhtAddressLookup</a>",1,["iroh_mainline_address_lookup::DhtAddressLookup"]]]],["iroh_mdns_address_lookup",[["impl UnsafeUnpin for <a class=\"enum\" href=\"iroh_mdns_address_lookup/enum.DiscoveryEvent.html\" title=\"enum iroh_mdns_address_lookup::DiscoveryEvent\">DiscoveryEvent</a>",1,["iroh_mdns_address_lookup::DiscoveryEvent"]],["impl UnsafeUnpin for <a class=\"struct\" href=\"iroh_mdns_address_lookup/struct.MdnsAddressLookup.html\" title=\"struct iroh_mdns_address_lookup::MdnsAddressLookup\">MdnsAddressLookup</a>",1,["iroh_mdns_address_lookup::MdnsAddressLookup"]],["impl UnsafeUnpin for <a class=\"struct\" href=\"iroh_mdns_address_lookup/struct.MdnsAddressLookupBuilder.html\" title=\"struct iroh_mdns_address_lookup::MdnsAddressLookupBuilder\">MdnsAddressLookupBuilder</a>",1,["iroh_mdns_address_lookup::MdnsAddressLookupBuilder"]]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":57,"fragment_lengths":[498,767]}
