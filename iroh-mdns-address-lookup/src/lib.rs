@@ -59,7 +59,6 @@ use std::{
     sync::Arc,
 };
 
-use futures_util::stream::FuturesUnordered;
 use iroh::{
     Endpoint,
     address_lookup::{
@@ -69,7 +68,7 @@ use iroh::{
 };
 use iroh_base::{EndpointId, PublicKey};
 use n0_future::{
-    Stream, StreamExt,
+    FuturesUnordered, Stream, StreamExt,
     boxed::BoxStream,
     task::{self, AbortOnDropHandle},
     time::{self, Duration},
@@ -100,6 +99,8 @@ const MIN_LOOKUP_DURATION: Duration = Duration::from_secs(10);
 /// The key of the attribute under which the `RelayUrl` is stored in
 /// the TXT record supported by swarm-discovery.
 const RELAY_URL_ATTRIBUTE: &str = "relay";
+
+const MAX_CACHED_ENDPOINTS: usize = 4096;
 
 /// Address Lookup using `swarm-discovery`, a variation on mdns.
 ///
@@ -540,7 +541,8 @@ fn lookup_duration(cadence: Duration) -> Duration {
 ///
 /// Returns `true` if the endpoint is new or its advertised content changed.
 /// Observation timestamps do not affect the comparison. The cached item is
-/// always replaced so later lookups use the latest addresses.
+/// replaced for cached endpoints so later lookups use the latest addresses.
+/// When the cache is full, new endpoints are reported without being cached.
 fn cache_discovery(
     cache: &mut HashMap<PublicKey, AddressLookupItem>,
     item: AddressLookupItem,
@@ -549,7 +551,9 @@ fn cache_discovery(
     let changed = cache
         .get(&id)
         .is_none_or(|old| old.endpoint_info() != item.endpoint_info());
-    cache.insert(id, item);
+    if cache.len() < MAX_CACHED_ENDPOINTS || cache.contains_key(&id) {
+        cache.insert(id, item);
+    }
     changed
 }
 
