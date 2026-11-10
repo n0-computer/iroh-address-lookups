@@ -630,9 +630,9 @@ impl AddressLookup for MdnsAddressLookup {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use futures_util::FutureExt;
+
+    use super::*;
 
     fn discovered(endpoint_id: EndpointId, port: u16) -> Message {
         Message::Discovered(
